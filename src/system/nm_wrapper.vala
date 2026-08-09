@@ -42,6 +42,8 @@ namespace Singularity {
         private GenericArray<NM.DeviceWifi> wifi_devices = new GenericArray<NM.DeviceWifi>();
         private NM.DeviceEthernet? ethernet_device;
         private GenericArray<NM.DeviceEthernet> ethernet_devices = new GenericArray<NM.DeviceEthernet>();
+        private bool wifi_request_in_flight = false;
+        private bool wifi_requested_state = false;
 
         public NetworkManagerWrapper() {
             init_client.begin();
@@ -146,36 +148,49 @@ namespace Singularity {
         // emits notify::wireless-enabled which update_state() picks up. This is
         // the public D-Bus surface, so it works against any implementation that
         // owns the name (NetworkManager or sinty-nm), with no nmcli binary.
-        private void set_radio_enabled_async(string property, bool value) {
-            if (client == null) return;
-            client.dbus_set_property.begin(
+        private async bool set_radio_enabled_async(string property, bool value) {
+            if (client == null) return false;
+            try {
+                yield client.dbus_set_property(
                 "/org/freedesktop/NetworkManager",
                 "org.freedesktop.NetworkManager",
-                property, new GLib.Variant.boolean(value), -1, null,
-                (obj, res) => {
-                    try {
-                        client.dbus_set_property.end(res);
-                    } catch (Error e) {
-                        warning("set %s failed: %s", property, e.message);
-                    }
-                });
+                property, new GLib.Variant.boolean(value), -1, null);
+                return true;
+            } catch (Error e) {
+                warning("set %s failed: %s", property, e.message);
+                return false;
+            }
+        }
+
+        private async void apply_wifi_request() {
+            if (client == null) return;
+            wifi_request_in_flight = true;
+            bool target = wifi_requested_state;
+            bool ok = false;
+            do {
+                target = wifi_requested_state;
+                ok = yield set_radio_enabled_async("WirelessEnabled", target);
+            } while (ok && target != wifi_requested_state);
+            wifi_request_in_flight = false;
+            update_state();
         }
 
         public void toggle_wifi() {
             if (client == null) return;
-            bool target = !client.wireless_enabled;
-            set_radio_enabled_async("WirelessEnabled", target);
-            if (wifi_enabled != target) {
-                wifi_enabled = target;
-                state_changed();
+            bool current_intent = wifi_request_in_flight
+                ? wifi_requested_state
+                : client.wireless_enabled;
+            wifi_requested_state = !current_intent;
+            if (!wifi_request_in_flight) {
+                apply_wifi_request.begin();
             }
         }
 
         public void toggle_airplane_mode() {
             if (client == null) return;
             bool turn_on = !is_airplane_mode;
-            set_radio_enabled_async("WirelessEnabled", !turn_on);
-            set_radio_enabled_async("WwanEnabled", !turn_on);
+            set_radio_enabled_async.begin("WirelessEnabled", !turn_on);
+            set_radio_enabled_async.begin("WwanEnabled", !turn_on);
         }
 
         public void request_scan() {
