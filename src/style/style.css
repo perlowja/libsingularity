@@ -698,6 +698,53 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
     background-color: transparent;
 }
 
+window.layout-edit-overlay {
+    background-color: alpha(black, 0.16);
+}
+
+.layout-edit-save {
+    min-width: 132px;
+    min-height: 42px;
+    padding: 0 18px;
+    box-shadow: 0 4px 14px alpha(@shadow_color, 0.38);
+}
+
+.bar-layout-drop-placeholder {
+    min-width: 4px;
+    min-height: 4px;
+    border-radius: 999px;
+    background-color: @accent_color;
+    box-shadow: 0 0 0 3px alpha(@accent_color, 0.2);
+}
+
+.dock-layout-viewport overshoot,
+.dock-layout-viewport undershoot {
+    background: none;
+}
+
+.dock-layout-viewport:focus,
+.dock-layout-viewport:focus-visible,
+.dock-layout-viewport:focus-within {
+    outline: none;
+    border-color: alpha(@text_color, 0.03);
+}
+
+.dock-layout-viewport.editing undershoot.left {
+    background-image: linear-gradient(to right, @surface_overlay, transparent);
+}
+
+.dock-layout-viewport.editing undershoot.right {
+    background-image: linear-gradient(to right, transparent, @surface_overlay);
+}
+
+.dock-layout-viewport.editing undershoot.top {
+    background-image: linear-gradient(to bottom, @surface_overlay, transparent);
+}
+
+.dock-layout-viewport.editing undershoot.bottom {
+    background-image: linear-gradient(to bottom, transparent, @surface_overlay);
+}
+
 /*
  * When the compositor provides hardware background blur (SINGULARITY_BLUR_ENABLED),
  * the dock background becomes translucent so the blur shows through.
@@ -798,6 +845,14 @@ window.singularity-blur .dock-window:backdrop .dock-box,
     box-shadow: 0 2px 8px alpha(@shadow_color, 0.3);
     padding: 4px 8px;
     margin: 4px 0;
+}
+
+.dock-box .dock-clock-box,
+.dock-box .dock-system-box {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    margin: 0;
 }
 
 .dock-clock {
