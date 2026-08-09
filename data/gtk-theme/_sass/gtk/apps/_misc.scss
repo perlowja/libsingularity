@@ -93,7 +93,7 @@ notebook.meld-notebook {
  * Chromium *
  ************/
 window.background.chromium {
-  background-color: $surface;
+  background-color: $titlebar;
 
   // FIXME: There is no way to change the color of the toolbar buttons
   // toolbar button { color: $text-secondary; }
