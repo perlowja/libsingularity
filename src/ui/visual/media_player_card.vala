@@ -40,6 +40,7 @@ namespace Singularity.Widgets {
         private MprisPlayer? player = null;
         private DBusConnection? connection = null;
         private string? current_player_name = null;
+        private uint _dbus_setup_source = 0;
         private uint _signal_sub_id = 0;
         private uint _poll_timer_id = 0;
         private int64 track_length_us = 0;
@@ -54,7 +55,16 @@ namespace Singularity.Widgets {
          * card hides itself when nothing is playing - useful in the sidebar
          * where empty space should disappear.
          */
-        public bool always_visible { get; set; default = false; }
+        private bool _always_visible = false;
+        public bool always_visible {
+            get { return _always_visible; }
+            set {
+                _always_visible = value;
+                if (value) this.visible = true;
+                else if (player == null) this.visible = false;
+                else update_state();
+            }
+        }
 
         public MediaPlayerCard() {
             Object(orientation: Orientation.VERTICAL, spacing: 0);
@@ -186,7 +196,11 @@ namespace Singularity.Widgets {
             main_row.append(right_box);
             append(main_row);
 
-            setup_dbus();
+            _dbus_setup_source = Idle.add(() => {
+                _dbus_setup_source = 0;
+                setup_dbus();
+                return Source.REMOVE;
+            });
         }
 
         // Disegna bg_texture con clip arrotondato + dim accent, poi i figli sopra
@@ -614,6 +628,10 @@ namespace Singularity.Widgets {
         }
 
         protected override void dispose() {
+            if (_dbus_setup_source != 0) {
+                Source.remove(_dbus_setup_source);
+                _dbus_setup_source = 0;
+            }
             if (_poll_timer_id != 0) {
                 Source.remove(_poll_timer_id);
                 _poll_timer_id = 0;

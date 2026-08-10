@@ -559,7 +559,7 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
 }
 
 .panel.overview-mode {
-    background-color: @overview_bg;
+    background-color: transparent;
 }
 
 .notification-button {
@@ -625,6 +625,33 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
 .panel.overview-mode .system-pill-button {
     background-color: transparent;
     box-shadow: none;
+}
+
+.panel.workspace-overview-mode {
+    background-color: transparent;
+}
+
+.panel.workspace-overview-mode .activities-button,
+.panel.workspace-overview-mode .clock-button,
+.panel.workspace-overview-mode .notification-button,
+.panel.workspace-overview-mode .system-pill-button {
+    background-color: transparent;
+    box-shadow: none;
+}
+
+.tiling-position-track {
+    min-width: 58px;
+    min-height: 18px;
+    border-radius: 999px;
+    background-color: alpha(currentColor, 0.16);
+    box-shadow: inset 0 0 0 1px alpha(currentColor, 0.08);
+}
+
+.tiling-position-thumb {
+    min-height: 8px;
+    border-radius: 999px;
+    background-color: currentColor;
+    box-shadow: 0 1px 3px alpha(black, 0.28);
 }
 
 /* Flat panel mode: solid black background, no pill buttons */
@@ -1337,7 +1364,7 @@ popover.dock-window-previews > contents {
 }
 
 .panel.overview-mode {
-    background-color: @overview_bg;
+    background-color: transparent;
 }
 
 .search-entry {
@@ -3457,6 +3484,43 @@ window.singularity.dialog {
     border-radius: 20px;
     border: 1px solid alpha(white, 0.10);
     box-shadow: 0 12px 48px alpha(@shadow_color, 0.55);
+}
+
+.singularity.run-dialog.dialog-overlay .dialog-content {
+    padding: 5px;
+}
+
+.singularity.run-dialog.dialog-overlay .dialog-content .run-entry {
+    background-color: transparent;
+    border-color: transparent;
+    box-shadow: none;
+}
+
+.run-suggestions row {
+    border-radius: 15px;
+}
+
+.run-entry.action-mode {
+    padding-left: 28px;
+}
+
+.run-action-prefix {
+    color: @accent_color;
+    font-weight: 700;
+}
+
+.run-preview {
+    padding: 8px 10px 10px 12px;
+    border-left: 1px solid alpha(@text_color, 0.10);
+}
+
+.run-preview-title {
+    font-weight: 600;
+}
+
+.run-preview-text {
+    padding: 8px;
+    background-color: alpha(@text_color, 0.04);
 }
 
 .singularity.dialog.transparent {
