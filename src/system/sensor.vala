@@ -93,6 +93,22 @@ namespace Singularity {
         private const string HWMON_DIR = "/sys/class/hwmon";
         private const string THERMAL_DIR = "/sys/class/thermal";
         private const string CPUFREQ_DIR = "/sys/devices/system/cpu/cpufreq";
+        private const string CPUINFO_PATH = "/proc/cpuinfo";
+
+        /**
+         * Prefix applied to every path this class reads.
+         *
+         * Empty in normal use, so the paths are exactly the ones above. Tests
+         * point it at a fixture tree instead: the classification rules are the
+         * part of this class most likely to be wrong on hardware nobody has to
+         * hand, and they are only testable against synthetic sysfs.
+         */
+        public string sysfs_root { get; set; default = ""; }
+
+        private string hwmon_dir() { return sysfs_root + HWMON_DIR; }
+        private string thermal_dir() { return sysfs_root + THERMAL_DIR; }
+        private string cpufreq_dir() { return sysfs_root + CPUFREQ_DIR; }
+        private string cpuinfo_path() { return sysfs_root + CPUINFO_PATH; }
 
         // Kernel driver names, not product names.
         private const string[] CPU_CHIPS = {
@@ -280,13 +296,13 @@ namespace Singularity {
             SensorReading[] found = {};
             Dir dir;
             try {
-                dir = Dir.open(HWMON_DIR, 0);
+                dir = Dir.open(hwmon_dir(), 0);
             } catch (FileError e) {
                 return found;
             }
             string? node;
             while ((node = dir.read_name()) != null) {
-                string base_path = HWMON_DIR + "/" + node;
+                string base_path = hwmon_dir() + "/" + node;
                 string chip = read_first_line(base_path + "/name") ?? node;
                 Dir inner;
                 try {
@@ -322,7 +338,7 @@ namespace Singularity {
             SensorReading[] found = {};
             Dir dir;
             try {
-                dir = Dir.open(THERMAL_DIR, 0);
+                dir = Dir.open(thermal_dir(), 0);
             } catch (FileError e) {
                 return found;
             }
@@ -331,7 +347,7 @@ namespace Singularity {
                 if (!node.has_prefix("thermal_zone")) {
                     continue;
                 }
-                string base_path = THERMAL_DIR + "/" + node;
+                string base_path = thermal_dir() + "/" + node;
                 string? zone_type = read_first_line(base_path + "/type");
                 string? raw = read_first_line(base_path + "/temp");
                 if (zone_type == null || raw == null) {
@@ -350,13 +366,13 @@ namespace Singularity {
             FanReading[] found = {};
             Dir dir;
             try {
-                dir = Dir.open(HWMON_DIR, 0);
+                dir = Dir.open(hwmon_dir(), 0);
             } catch (FileError e) {
                 return found;
             }
             string? node;
             while ((node = dir.read_name()) != null) {
-                string base_path = HWMON_DIR + "/" + node;
+                string base_path = hwmon_dir() + "/" + node;
                 string chip = read_first_line(base_path + "/name") ?? node;
                 Dir inner;
                 try {
@@ -392,13 +408,13 @@ namespace Singularity {
             PowerReading[] found = {};
             Dir dir;
             try {
-                dir = Dir.open(HWMON_DIR, 0);
+                dir = Dir.open(hwmon_dir(), 0);
             } catch (FileError e) {
                 return found;
             }
             string? node;
             while ((node = dir.read_name()) != null) {
-                string base_path = HWMON_DIR + "/" + node;
+                string base_path = hwmon_dir() + "/" + node;
                 string chip = read_first_line(base_path + "/name") ?? node;
 
                 // 1. A direct power reading, in microwatts.
@@ -473,7 +489,7 @@ namespace Singularity {
          */
         private int[] clocks_from_cpuinfo() {
             int[] found = {};
-            string? cpuinfo = read_first_line("/proc/cpuinfo");
+            string? cpuinfo = read_first_line(cpuinfo_path());
             if (cpuinfo == null) {
                 return found;
             }
@@ -497,7 +513,7 @@ namespace Singularity {
             int[] found = {};
             Dir dir;
             try {
-                dir = Dir.open(CPUFREQ_DIR, 0);
+                dir = Dir.open(cpufreq_dir(), 0);
             } catch (FileError e) {
                 return clocks_from_cpuinfo();
             }
@@ -506,7 +522,7 @@ namespace Singularity {
                 if (!node.has_prefix("policy")) {
                     continue;
                 }
-                string? raw = read_first_line(CPUFREQ_DIR + "/" + node + "/scaling_cur_freq");
+                string? raw = read_first_line(cpufreq_dir() + "/" + node + "/scaling_cur_freq");
                 if (raw == null) {
                     continue;
                 }
