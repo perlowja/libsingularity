@@ -3,6 +3,19 @@ using GLib;
 
 namespace Singularity.Widgets {
 
+    private class ChipDragPayload : Object {
+        public string id;
+        public ChipBar owner;
+        public bool handled = false;
+        public bool cancelled = false;
+        public bool detach_queued = false;
+
+        public ChipDragPayload (ChipBar owner, string id) {
+            this.owner = owner;
+            this.id = id;
+        }
+    }
+
     /**
      * A single tab chip in the ChipBar.
      *
@@ -92,6 +105,8 @@ namespace Singularity.Widgets {
         public signal void chip_activated (string id);
         /** Emitted with the chip's id when the close button is clicked. */
         public signal void chip_closed    (string id);
+        /** Emitted when a detachable chip is dropped outside its window. */
+        public signal void chip_detached  (string id);
 
         /**
          * Emitted after the user reorders the chips by drag-and-drop.
@@ -105,6 +120,8 @@ namespace Singularity.Widgets {
 
         private ScrolledWindow _scroll;
         private Box            _chips_box;
+        private weak Widget?   _drop_root;
+        private DropTarget?    _root_drop_target;
 
         /**
          * Per-chip ellipsis policy applied to every chip added afterwards
@@ -125,6 +142,9 @@ namespace Singularity.Widgets {
          * chip. Default off so the behaviour is opt-in.
          */
         public bool reorderable { get; set; default = false; }
+
+        /** When true, dropping a chip outside its window requests a detach. */
+        public bool detachable { get; set; default = false; }
 
         public ChipBar () {
             Object (orientation: Orientation.HORIZONTAL, spacing: 0);
@@ -152,7 +172,9 @@ namespace Singularity.Widgets {
             notify["ellipsize-labels"].connect (_apply_label_policy);
             notify["min-label-chars"].connect  (_apply_label_policy);
             notify["max-label-chars"].connect  (_apply_label_policy);
-            notify["reorderable"].connect      (_apply_reorderable_policy);
+            notify["reorderable"].connect      (_apply_drag_policy);
+            notify["detachable"].connect       (_apply_drag_policy);
+            notify["root"].connect             (_sync_root_drop_target);
         }
 
         // Buildable: a <child> Chip declared in markup is routed into the bar
@@ -187,13 +209,13 @@ namespace Singularity.Widgets {
             chip.close_requested.connect (() => chip_closed    (cid));
             if (chip.parent != _chips_box) _chips_box.append (chip);
             chip_count++;
-            if (reorderable) _install_drag (chip);
+            if (reorderable || detachable) _install_drag (chip);
         }
 
         // -- Drag-to-reorder ------------------------------------------------
         //
         // Each chip carries:
-        //  - a GtkDragSource that hands off the chip's id (as string)
+        //  - a GtkDragSource that hands off the chip's id
         //  - a GtkDropTarget that, on drop, finds the source chip by id,
         //    pulls it out of the box and re-inserts it before/after the
         //    target chip based on the cursor x position.
@@ -208,8 +230,10 @@ namespace Singularity.Widgets {
             var src = new Gtk.DragSource ();
             src.set_actions (Gdk.DragAction.MOVE);
             string cid = chip.chip_id;
+            ChipDragPayload? payload = null;
             src.prepare.connect ((x, y) => {
-                return new Gdk.ContentProvider.for_value (cid);
+                payload = new ChipDragPayload (this, cid);
+                return new Gdk.ContentProvider.for_value (payload);
             });
             // A translucent live copy of the chip follows the cursor (the
             // "ghost"); the original is dimmed in place so it reads as the slot
@@ -222,16 +246,28 @@ namespace Singularity.Widgets {
             src.drag_end.connect ((drag, delete_data) => {
                 chip.remove_css_class ("chip-dragging");
                 _clear_drop_marks ();
+                if (detachable && payload != null &&
+                        !payload.handled && !payload.cancelled)
+                    _queue_detach (payload);
+                payload = null;
             });
             src.drag_cancel.connect ((drag, reason) => {
                 chip.remove_css_class ("chip-dragging");
                 _clear_drop_marks ();
+                if (payload == null) return false;
+                payload.cancelled = reason == Gdk.DragCancelReason.ERROR;
+                if (detachable && !payload.handled && !payload.cancelled) {
+                    _queue_detach (payload);
+                    return true;
+                }
                 return false;
             });
             chip.add_controller (src);
             chip.set_data<Gtk.DragSource> ("singularity-chip-drag-src", src);
 
-            var tgt = new Gtk.DropTarget (typeof (string), Gdk.DragAction.MOVE);
+            if (!reorderable) return;
+
+            var tgt = new Gtk.DropTarget (typeof (ChipDragPayload), Gdk.DragAction.MOVE);
             // While hovering, mark which side of this chip the drop will land on
             // so the user sees where the dragged chip is going.
             tgt.motion.connect ((x, y) => {
@@ -244,7 +280,9 @@ namespace Singularity.Widgets {
             });
             tgt.drop.connect ((value, x, y) => {
                 _clear_drop_marks ();
-                string dragged_id = value.get_string ();
+                var dropped = value.get_object () as ChipDragPayload;
+                if (dropped == null || dropped.owner != this) return false;
+                string dragged_id = dropped.id;
                 if (dragged_id == cid) return false;
                 var dragged = _find (dragged_id);
                 if (dragged == null) return false;
@@ -257,6 +295,7 @@ namespace Singularity.Widgets {
                     _insert_at (dragged, target_index);
                 }
                 string[] ids = _ordered_ids ();
+                dropped.handled = true;
                 chips_reordered (ids);
                 return true;
             });
@@ -291,13 +330,46 @@ namespace Singularity.Widgets {
             chip.set_data<bool>              ("singularity-chip-drag-installed", false);
         }
 
-        private void _apply_reorderable_policy () {
+        private void _sync_root_drop_target () {
+            var root = get_root () as Widget;
+            if (_drop_root == root &&
+                    ((_root_drop_target != null) == detachable)) return;
+            if (_drop_root != null && _root_drop_target != null)
+                _drop_root.remove_controller (_root_drop_target);
+            _drop_root = null;
+            _root_drop_target = null;
+            if (!detachable || root == null) return;
+
+            var target = new DropTarget (typeof (ChipDragPayload),
+                                         Gdk.DragAction.MOVE);
+            target.drop.connect ((value, x, y) => {
+                var payload = value.get_object () as ChipDragPayload;
+                if (payload == null || payload.owner != this) return false;
+                payload.handled = true;
+                return true;
+            });
+            root.add_controller (target);
+            _drop_root = root;
+            _root_drop_target = target;
+        }
+
+        private void _queue_detach (ChipDragPayload payload) {
+            if (payload.detach_queued) return;
+            payload.detach_queued = true;
+            Idle.add (() => {
+                chip_detached (payload.id);
+                return Source.REMOVE;
+            });
+        }
+
+        private void _apply_drag_policy () {
+            _sync_root_drop_target ();
             Widget? w = _chips_box.get_first_child ();
             while (w != null) {
                 var c = w as Chip;
                 if (c != null) {
-                    if (reorderable) _install_drag (c);
-                    else             _uninstall_drag (c);
+                    _uninstall_drag (c);
+                    if (reorderable || detachable) _install_drag (c);
                 }
                 w = w.get_next_sibling ();
             }
