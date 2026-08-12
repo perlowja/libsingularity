@@ -125,6 +125,8 @@ namespace Singularity {
         private uint _timer_id = 0;
         private int _interval_sec = DEFAULT_INTERVAL_SEC;
         private SensorReading[] _readings = {};
+        // Sysfs-derived readings only, without the NVIDIA set merged in.
+        private SensorReading[] _base_readings = {};
         private int[] _clocks_khz = {};
         private FanReading[] _fans = {};
         private PowerReading[] _power = {};
@@ -406,6 +408,11 @@ namespace Singularity {
                 } catch (FileError e) {
                     continue;
                 }
+                // Channels already covered by a direct powerN_input reading.
+                // Shunt drivers (INA219/ina2xx) expose BOTH that and inN/currN
+                // for one physical rail, so synthesising V x I for such a
+                // channel would report the same rail twice under two labels.
+                bool[] direct_channel = new bool[9];
                 string? entry;
                 while ((entry = inner.read_name()) != null) {
                     if (!entry.has_prefix("power") || !entry.has_suffix("_input")) {
@@ -420,6 +427,10 @@ namespace Singularity {
                         continue;
                     }
                     string stem = entry.substring(0, entry.length - "_input".length);
+                    int direct_ch = int.parse(stem.substring("power".length));
+                    if (direct_ch >= 1 && direct_ch <= 8) {
+                        direct_channel[direct_ch] = true;
+                    }
                     string? label = read_first_line(base_path + "/" + stem + "_label");
                     string name = (label != null && label != "")
                         ? "%s %s".printf(chip, label)
@@ -430,6 +441,9 @@ namespace Singularity {
                 // 2. Shunt monitors: bus volts x channel amps. hwmon numbers
                 //    both from 1, so channel N pairs inN_input with currN_input.
                 for (int ch = 1; ch <= 8; ch++) {
+                    if (direct_channel[ch]) {
+                        continue;
+                    }
                     string? volt_raw = read_first_line("%s/in%d_input".printf(base_path, ch));
                     string? curr_raw = read_first_line("%s/curr%d_input".printf(base_path, ch));
                     if (volt_raw == null || curr_raw == null) {
@@ -450,31 +464,42 @@ namespace Singularity {
             return found;
         }
 
+        /**
+         * CPU MHz as reported by /proc/cpuinfo.
+         *
+         * Used when cpufreq yields nothing -- either because the directory is
+         * absent (common on virtual machines and on x86 with no scaling driver)
+         * or because it exists but is empty / has no readable scaling_cur_freq.
+         */
+        private int[] clocks_from_cpuinfo() {
+            int[] found = {};
+            string? cpuinfo = read_first_line("/proc/cpuinfo");
+            if (cpuinfo == null) {
+                return found;
+            }
+            foreach (string line in cpuinfo.split("\n")) {
+                if (!line.down().has_prefix("cpu mhz")) {
+                    continue;
+                }
+                string[] parts = line.split(":");
+                if (parts.length < 2) {
+                    continue;
+                }
+                int mhz = (int) double.parse(parts[1].strip());
+                if (mhz > 0) {
+                    found += mhz * 1000;
+                }
+            }
+            return found;
+        }
+
         private int[] collect_clocks() {
             int[] found = {};
             Dir dir;
             try {
                 dir = Dir.open(CPUFREQ_DIR, 0);
             } catch (FileError e) {
-                // cpufreq is absent on many virtual machines and on some x86
-                // without a scaling driver; /proc/cpuinfo still reports a MHz.
-                string? cpuinfo = read_first_line("/proc/cpuinfo");
-                if (cpuinfo != null) {
-                    foreach (string line in cpuinfo.split("\n")) {
-                        if (!line.down().has_prefix("cpu mhz")) {
-                            continue;
-                        }
-                        string[] parts = line.split(":");
-                        if (parts.length < 2) {
-                            continue;
-                        }
-                        int mhz = (int) double.parse(parts[1].strip());
-                        if (mhz > 0) {
-                            found += mhz * 1000;
-                        }
-                    }
-                }
-                return found;
+                return clocks_from_cpuinfo();
             }
             string? node;
             while ((node = dir.read_name()) != null) {
@@ -489,6 +514,12 @@ namespace Singularity {
                 if (khz > 0) {
                     found += khz;
                 }
+            }
+            // A present cpufreq directory can still yield nothing: no policy*
+            // entries, or policies whose scaling_cur_freq is unreadable. Fall
+            // back on the same source as the absent-directory case.
+            if (found.length == 0) {
+                return clocks_from_cpuinfo();
             }
             return found;
         }
@@ -575,6 +606,13 @@ namespace Singularity {
                     }
                     parse_nvidia(stdout_text);
                     _nvidia_in_flight = false;
+                    // Publish what just arrived. Without this a one-shot
+                    // refresh() never reports an NVIDIA GPU, and a timer-driven
+                    // caller sees it only on the following tick. This merges the
+                    // cached sysfs readings rather than calling refresh() again,
+                    // so completing a query cannot start another one and does not
+                    // re-walk every hwmon and thermal node.
+                    publish_state();
                 });
             } catch (Error e) {
                 // Driver present but the tool failed: stop asking.
@@ -598,6 +636,10 @@ namespace Singularity {
         }
 
         public void refresh() {
+            refresh_internal(true);
+        }
+
+        private void refresh_internal(bool query_nvidia) {
             // BOTH sources, always -- not hwmon-with-thermal-as-fallback.
             // MEASURED on an NVIDIA IGX Thor dev kit: hwmon exists there, but
             // contains only a Super-I/O chip, INA power monitors, the NIC and
@@ -619,9 +661,49 @@ namespace Singularity {
                     found += zone;
                 }
             }
+            // Keep the sysfs-derived set separate from the NVIDIA set: when the
+            // async query lands, publish_state() can merge the two again without
+            // re-walking every hwmon and thermal node.
+            SensorReading[] base_found = found;
+
             // NVIDIA readings arrive asynchronously, so this merges whatever the
             // last query returned rather than waiting for a fresh one.
-            refresh_nvidia();
+            if (query_nvidia) {
+                refresh_nvidia();
+            }
+            _base_readings = base_found;
+
+            _fans = collect_fans();
+            _power = collect_power();
+
+            int[] clocks = collect_clocks();
+            // Highest first, so a caller can take element 0 as "the" clock.
+            if (clocks.length > 1) {
+                for (int i = 0; i < clocks.length; i++) {
+                    for (int j = i + 1; j < clocks.length; j++) {
+                        if (clocks[j] > clocks[i]) {
+                            int swap = clocks[i];
+                            clocks[i] = clocks[j];
+                            clocks[j] = swap;
+                        }
+                    }
+                }
+            }
+            _clocks_khz = clocks;
+
+            publish_state();
+        }
+
+        /**
+         * Recompute the published properties from the cached reading sets and
+         * emit updated().
+         *
+         * Split out of refresh_internal() so the asynchronous nvidia-smi
+         * callback can publish its result without re-walking every hwmon and
+         * thermal node -- it merges _base_readings with the NVIDIA set instead.
+         */
+        private void publish_state() {
+            SensorReading[] found = _base_readings;
             foreach (SensorReading reading in _nvidia_readings) {
                 found += reading;
             }
@@ -650,29 +732,17 @@ namespace Singularity {
                 }
             }
 
-            _fans = collect_fans();
-            _power = collect_power();
-
-            int[] clocks = collect_clocks();
-            // Highest first, so a caller can take element 0 as "the" clock.
-            if (clocks.length > 1) {
-                for (int i = 0; i < clocks.length; i++) {
-                    for (int j = i + 1; j < clocks.length; j++) {
-                        if (clocks[j] > clocks[i]) {
-                            int swap = clocks[i];
-                            clocks[i] = clocks[j];
-                            clocks[j] = swap;
-                        }
-                    }
-                }
-            }
-            _clocks_khz = clocks;
-
             cpu_millidegrees = hottest_cpu;
             gpu_millidegrees = hottest_gpu;
             system_millidegrees = hottest_system;
-            cpu_khz = clocks.length > 0 ? clocks[0] : -1;
-            available = found.length > 0;
+            cpu_khz = _clocks_khz.length > 0 ? _clocks_khz[0] : -1;
+            // Any readable category counts. A VM or a restricted-hwmon setup
+            // can expose clocks, fans or power rails with no temperature at all;
+            // reporting "nothing readable" there would hide real data.
+            available = found.length > 0
+                || _clocks_khz.length > 0
+                || _fans.length > 0
+                || _power.length > 0;
 
             updated();
         }
