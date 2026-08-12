@@ -211,6 +211,7 @@ if get_option('system')
     'src/system/night_light_manager.vala',
     'src/system/autostart_manager.vala',
     'src/system/hardware_info.vala',
+    'src/system/sensor.vala',
   )
 
   libsingularity_system = shared_library('singularity-system',
