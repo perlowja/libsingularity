@@ -654,6 +654,42 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
     box-shadow: 0 1px 3px alpha(black, 0.28);
 }
 
+.workspace-switch-feedback-window {
+    background-color: transparent;
+}
+
+.workspace-switch-feedback {
+    padding: 12px 14px;
+    border-radius: 999px;
+    background-color: alpha(black, 0.72);
+    border: 1px solid alpha(white, 0.12);
+    box-shadow: 0 10px 30px alpha(black, 0.34);
+}
+
+.workspace-switch-feedback.opening {
+    animation: workspace-feedback-open 140ms ease-out;
+}
+
+.workspace-switch-feedback.closing {
+    animation: workspace-feedback-close 150ms ease-in forwards;
+}
+
+.workspace-switch-marker {
+    min-height: 10px;
+    border-radius: 999px;
+    background-color: white;
+}
+
+@keyframes workspace-feedback-open {
+    from { opacity: 0; transform: scale(0.82); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes workspace-feedback-close {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(0.9); }
+}
+
 .tiling-slot-organizer {
     border-radius: 22px;
     background-color: alpha(@theme_bg_color, 0.94);
