@@ -23,6 +23,8 @@ namespace Singularity.Widgets {
         private Image _icon;
         private Label _title_label;
         private Label _subtitle_label;
+        private Box _main_box;
+        private Box _text_box;
 
         private int _state = 0;
         private int _n_states = 2;
@@ -95,6 +97,14 @@ namespace Singularity.Widgets {
             set { _auto_toggle = value; }
         }
 
+        public bool compact {
+            set {
+                _text_box.visible = !value;
+                _main_box.spacing = value ? 0 : 10;
+                _main_box.halign = value ? Align.CENTER : Align.FILL;
+            }
+        }
+
         // -- Constructor ------------------------------------------------------
 
         public QuickSettingTile(string title, string icon_name, bool is_active = false) {
@@ -109,37 +119,37 @@ namespace Singularity.Widgets {
         construct {
             add_css_class("quick-setting-tile");
 
-            var main_box = new Box(Orientation.HORIZONTAL, 10);
-            main_box.valign = Align.CENTER;
-            main_box.margin_start = 2;
-            main_box.margin_end = 2;
-            main_box.margin_top = 6;
-            main_box.margin_bottom = 6;
+            _main_box = new Box(Orientation.HORIZONTAL, 10);
+            _main_box.valign = Align.CENTER;
+            _main_box.margin_start = 2;
+            _main_box.margin_end = 2;
+            _main_box.margin_top = 6;
+            _main_box.margin_bottom = 6;
 
             _icon = new Image();
             _icon.pixel_size = 20;
             _icon.add_css_class("tile-icon");
-            main_box.append(_icon);
+            _main_box.append(_icon);
 
-            var text_box = new Box(Orientation.VERTICAL, 0);
-            text_box.valign = Align.CENTER;
-            text_box.hexpand = true;
+            _text_box = new Box(Orientation.VERTICAL, 0);
+            _text_box.valign = Align.CENTER;
+            _text_box.hexpand = true;
 
             _title_label = new Label("");
             _title_label.add_css_class("tile-title");
             _title_label.halign = Align.START;
             _title_label.ellipsize = Pango.EllipsizeMode.END;
-            text_box.append(_title_label);
+            _text_box.append(_title_label);
 
             _subtitle_label = new Label("");
             _subtitle_label.add_css_class("tile-subtitle");
             _subtitle_label.halign = Align.START;
             _subtitle_label.ellipsize = Pango.EllipsizeMode.END;
             _subtitle_label.visible = false;
-            text_box.append(_subtitle_label);
+            _text_box.append(_subtitle_label);
 
-            main_box.append(text_box);
-            set_child(main_box);
+            _main_box.append(_text_box);
+            set_child(_main_box);
 
             clicked.connect(() => {
                 if (_auto_toggle) {

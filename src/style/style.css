@@ -1469,6 +1469,74 @@ popover.dock-window-previews > contents {
     padding: 0px;
 }
 
+.quick-settings-editing .quick-setting-group .quick-setting-tile.active,
+.quick-settings-editing .quick-setting-group .quick-setting-tile.state-partial,
+.quick-settings-editing .quick-setting-group .quick-setting-tile.active~.quick-setting-nav-btn,
+.quick-settings-editing .quick-setting-group .quick-setting-tile.state-partial~.quick-setting-nav-btn {
+    background-color: transparent;
+    color: @text_color;
+}
+
+.quick-settings-editing .quick-setting-group .quick-setting-tile.active .tile-icon,
+.quick-settings-editing .quick-setting-group .quick-setting-tile.state-partial .tile-icon {
+    background-color: alpha(@text_color, 0.1);
+    color: @text_color;
+}
+
+.quick-settings-inactive-grid .quick-setting-group {
+    opacity: 0.55;
+}
+
+.singularity button.quick-setting-editor-action {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+    border: none;
+    margin-top: -5px;
+    margin-right: -5px;
+    border-radius: 999px;
+    background-color: @view_bg_color;
+    box-shadow: 0 2px 8px alpha(@shadow_color, 0.45);
+}
+
+.singularity button.quick-setting-editor-action image {
+    min-width: 12px;
+    min-height: 12px;
+    padding: 0;
+}
+
+.quick-settings-grid.compact .quick-setting-group {
+    min-width: 60px;
+}
+
+.quick-settings-grid.compact .quick-setting-tile {
+    min-width: 40px;
+    min-height: 44px;
+    padding: 0;
+}
+
+.quick-settings-grid.compact .quick-setting-group .quick-setting-tile .tile-icon,
+.quick-settings-grid.compact .quick-setting-group .quick-setting-tile.active .tile-icon,
+.quick-settings-grid.compact .quick-setting-group .quick-setting-tile.state-partial .tile-icon {
+    background-color: transparent;
+}
+
+.quick-settings-grid.compact .quick-setting-tile .tile-title,
+.quick-settings-grid.compact .quick-setting-tile .tile-subtitle {
+    font-size: 0;
+    opacity: 0;
+    min-width: 0;
+}
+
+.quick-settings-grid.compact .quick-setting-tile .tile-icon {
+    padding: 6px;
+}
+
+.quick-settings-grid.compact .quick-setting-nav-btn {
+    min-width: 16px;
+    padding: 0 6px;
+}
+
 /* Quick-setting grouped pill (tile + nav fused) */
 .quick-setting-group {
     background-color: alpha(@text_color, 0.04);
