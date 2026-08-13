@@ -551,6 +551,14 @@ namespace Singularity {
                 return _nvidia_present;
             }
             _nvidia_checked = true;
+            // A fixture root describes a machine that is not this one, so the
+            // host's NVIDIA stack must not leak into it: nvidia-smi would report
+            // real GPUs on a real NVIDIA box and make the fixture's results
+            // depend on where the tests happen to run.
+            if (sysfs_root != "") {
+                _nvidia_present = false;
+                return _nvidia_present;
+            }
             _nvidia_present = FileUtils.test("/proc/driver/nvidia", FileTest.IS_DIR)
                 && Environment.find_program_in_path("nvidia-smi") != null;
             return _nvidia_present;
