@@ -102,6 +102,10 @@ namespace Singularity.Widgets {
                 _text_box.visible = !value;
                 _main_box.spacing = value ? 0 : 10;
                 _main_box.halign = value ? Align.CENTER : Align.FILL;
+                _main_box.margin_start = value ? 0 : 2;
+                _main_box.margin_end = value ? 0 : 2;
+                _main_box.margin_top = value ? 0 : 6;
+                _main_box.margin_bottom = value ? 0 : 6;
             }
         }
 

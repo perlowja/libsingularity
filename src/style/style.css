@@ -1594,13 +1594,27 @@ popover.dock-window-previews > contents {
 }
 
 .quick-settings-grid.compact .quick-setting-group {
-    min-width: 60px;
+    min-width: 48px;
+    min-height: 48px;
+    background-color: transparent;
 }
 
-.quick-settings-grid.compact .quick-setting-tile {
-    min-width: 40px;
-    min-height: 44px;
+.quick-settings-grid.compact .quick-setting-group .quick-setting-tile {
+    min-width: 48px;
+    min-height: 48px;
     padding: 0;
+    border-radius: 999px;
+    background-color: alpha(@text_color, 0.08);
+}
+
+.quick-settings-grid.compact .quick-setting-group .quick-setting-tile.active {
+    border-radius: 999px;
+    background-color: @accent_color;
+}
+
+.quick-settings-grid.compact .quick-setting-group .quick-setting-tile.state-partial {
+    border-radius: 999px;
+    background-color: alpha(@accent_color, 0.25);
 }
 
 .quick-settings-grid.compact .quick-setting-group .quick-setting-tile .tile-icon,
@@ -1620,9 +1634,9 @@ popover.dock-window-previews > contents {
     padding: 6px;
 }
 
-.quick-settings-grid.compact .quick-setting-nav-btn {
-    min-width: 16px;
-    padding: 0 6px;
+.quick-settings-grid.compact.quick-settings-editing .quick-setting-group .quick-setting-tile.active,
+.quick-settings-grid.compact.quick-settings-editing .quick-setting-group .quick-setting-tile.state-partial {
+    background-color: alpha(@text_color, 0.08);
 }
 
 /* Quick-setting grouped pill (tile + nav fused) */
