@@ -211,6 +211,7 @@ if get_option('system')
     'src/system/night_light_manager.vala',
     'src/system/autostart_manager.vala',
     'src/system/hardware_info.vala',
+    'src/system/sensor.vala',
   )
 
   libsingularity_system = shared_library('singularity-system',
@@ -256,6 +257,16 @@ if get_option('system')
     dependencies: [gio_dep, gee_dep],
   )
   test('hardware-info', hardware_info_test)
+
+  sensor_test = executable(
+    'sensor-test',
+    files(
+      'tests/sensor_test.vala',
+      'src/system/sensor.vala',
+    ),
+    dependencies: [gio_dep, gee_dep],
+  )
+  test('sensor', sensor_test)
 endif
 
 # Build the Singularity GTK3/GTK4 theme for third-party apps. Orchis supplies
