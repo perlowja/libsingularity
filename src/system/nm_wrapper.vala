@@ -127,13 +127,16 @@ namespace Singularity {
                 } else if (device is NM.DeviceEthernet) {
                     var ed = (NM.DeviceEthernet) device;
                     ethernet_devices.add(ed);
+                    has_ethernet = true;
                     if (ethernet_device == null) {
                         ethernet_device = ed;
-                        has_ethernet = true;
-                        ethernet_device.notify["state"].connect(() => {
-                            update_state();
-                        });
                     }
+                    // Watch EVERY wired port. Only the first one used to be
+                    // watched, so on a machine with more than one NIC a link
+                    // coming up on any other port never triggered a refresh.
+                    ed.notify["state"].connect(() => {
+                        update_state();
+                    });
                 }
             }
             if (wifi_device == null) {
@@ -709,6 +712,19 @@ namespace Singularity {
             wifi_enabled = client.wireless_enabled;
             bool wwan_off = !client.wwan_enabled;
             is_airplane_mode = !wifi_enabled && wwan_off;
+            // Prefer whichever wired port is actually ACTIVATED. Latching onto
+            // the first enumerated NIC reports "not connected" on any machine
+            // with several ethernet ports whenever the live link is not the
+            // first -- measured on cixmini (.66), where enp49s0 (DISCONNECTED)
+            // enumerates ahead of enp1s0, which carries the entire LAN. The
+            // NM state was correct throughout; only this selection was wrong.
+            for (int i = 0; i < ethernet_devices.length; i++) {
+                var cand = ethernet_devices.get(i);
+                if (cand.state == NM.DeviceState.ACTIVATED) {
+                    ethernet_device = cand;
+                    break;
+                }
+            }
             is_wired_connected = (ethernet_device != null &&
                 ethernet_device.state == NM.DeviceState.ACTIVATED);
             if (!wifi_enabled) {
