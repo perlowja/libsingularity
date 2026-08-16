@@ -42,6 +42,36 @@ private void thermal_zone(int n, string type, int millidegrees) {
     write_file(Path.build_filename(dir, "temp"), "%d\n".printf(millidegrees));
 }
 
+/** Add a critical trip point to an existing thermal zone. */
+private void thermal_trip(int n, int idx, string trip_type, int millidegrees) {
+    string dir = Path.build_filename(fixture_root, "sys", "class", "thermal",
+                                     "thermal_zone%d".printf(n));
+    write_file(Path.build_filename(dir, "trip_point_%d_type".printf(idx)),
+               trip_type + "\n");
+    write_file(Path.build_filename(dir, "trip_point_%d_temp".printf(idx)),
+               "%d\n".printf(millidegrees));
+}
+
+/** Create /sys/devices/system/cpu/cpufreq/policyN. */
+private void cpufreq_policy(int n, int cur_khz, int max_khz) {
+    string dir = Path.build_filename(fixture_root, "sys", "devices", "system",
+                                     "cpu", "cpufreq", "policy%d".printf(n));
+    write_file(Path.build_filename(dir, "scaling_cur_freq"), "%d\n".printf(cur_khz));
+    if (max_khz > 0) {
+        write_file(Path.build_filename(dir, "cpuinfo_max_freq"), "%d\n".printf(max_khz));
+    }
+}
+
+private Singularity.SensorReading? reading_named(Singularity.SensorMonitor m,
+                                                 string needle) {
+    foreach (Singularity.SensorReading r in m.readings()) {
+        if (needle in r.label) {
+            return r;
+        }
+    }
+    return null;
+}
+
 private void remove_path(File file) {
     try {
         var type = file.query_file_type(FileQueryInfoFlags.NOFOLLOW_SYMLINKS);
@@ -196,6 +226,256 @@ private void test_available_with_fan_but_no_temperature() {
     assert(m.available);
 }
 
+
+/*
+ * A sentinel must not become the hottest sensor on the machine.
+ *
+ * MEASURED on a fleet host: a hwmon node reported 65261850 -- 65261 C. With no
+ * ceiling it wins every "hottest" comparison, pins the summary chip to itself
+ * and paints the panel permanently critical. -274000 is the same class of
+ * value from the other end, below absolute zero.
+ */
+private void test_sentinel_temperatures_are_rejected() {
+    reset_fixture();
+    string junk = hwmon_chip(0, "k10temp");
+    hwmon_temp(junk, 1, 65261850, "Tctl");
+    hwmon_temp(junk, 2, -274000, "Tdie");
+    hwmon_temp(junk, 3, 54000, "Tccd1");
+
+    var m = monitor_for_fixture();
+    // Only the believable one survives, so it is also the hottest CPU.
+    assert(m.cpu_millidegrees == 54000);
+    assert(reading_named(m, "Tctl") == null);
+    assert(reading_named(m, "Tdie") == null);
+}
+
+/*
+ * tempN_crit, when the driver publishes one, is the limit.
+ */
+private void test_hwmon_crit_becomes_the_limit() {
+    reset_fixture();
+    string nvme = hwmon_chip(0, "nvme");
+    hwmon_temp(nvme, 1, 48000, "Composite");
+    write_file(Path.build_filename(nvme, "temp1_crit"), "84850\n");
+
+    var m = monitor_for_fixture();
+    var r = reading_named(m, "Composite");
+    assert(r != null);
+    assert(r.limit_millidegrees == 84850);
+    // 36 C of margin: unremarkable, despite being a drive.
+    assert(r.severity == Singularity.Severity.NORMAL);
+}
+
+/*
+ * tempN_crit is preferred over tempN_max.
+ *
+ * _max is frequently a soft target a chip sits at under full load; treating it
+ * as critical reports a merely busy CPU as overheating.
+ */
+private void test_crit_preferred_over_max() {
+    reset_fixture();
+    string cpu = hwmon_chip(0, "coretemp");
+    hwmon_temp(cpu, 1, 82000, "Package id 0");
+    write_file(Path.build_filename(cpu, "temp1_max"), "84000\n");
+    write_file(Path.build_filename(cpu, "temp1_crit"), "100000\n");
+
+    var m = monitor_for_fixture();
+    var r = reading_named(m, "Package id 0");
+    assert(r != null);
+    assert(r.limit_millidegrees == 100000);
+    // 18 C of margin against the hard limit is warm. Had _max been taken as
+    // the limit the margin would have been 2 C and this busy-but-healthy CPU
+    // would have been reported as HOT -- which is the whole point of the
+    // preference.
+    assert(r.severity == Singularity.Severity.WARM);
+}
+
+/*
+ * THE CASE THAT MAKES FALLBACKS NECESSARY.
+ *
+ * MEASURED across the fleet: k10temp (Ryzen), scmi (CIX Sky1) and cpu_thermal
+ * (Pi, most Arm SoCs) publish tempN_input with no tempN_crit and no critical
+ * trip point whatsoever. Without a fallback the CPU -- the one sensor anybody
+ * watches -- would be uncoloured on every Arm and AMD machine we ship.
+ */
+private void test_driver_without_crit_still_gets_a_limit() {
+    reset_fixture();
+    string cpu = hwmon_chip(0, "scmi_sensors");
+    hwmon_temp(cpu, 1, 91000, "CPU_B0");
+
+    var m = monitor_for_fixture();
+    var r = reading_named(m, "CPU_B0");
+    assert(r != null);
+    assert(r.limit_millidegrees == 100000);
+    // 9 C of margin.
+    assert(r.severity == Singularity.Severity.HOT);
+}
+
+/*
+ * A thermal zone with a critical trip point uses it, and the LOWEST one when
+ * several are published -- the first trip reached is the one that matters.
+ */
+private void test_thermal_uses_lowest_critical_trip() {
+    reset_fixture();
+    thermal_zone(0, "cpu-thermal", 70000);
+    thermal_trip(0, 0, "passive", 85000);
+    thermal_trip(0, 1, "critical", 105000);
+    thermal_trip(0, 2, "critical", 95000);
+
+    var m = monitor_for_fixture();
+    var r = reading_named(m, "cpu-thermal");
+    assert(r != null);
+    assert(r.limit_millidegrees == 95000);
+    assert(r.margin_millidegrees == 25000);
+    assert(r.severity == Singularity.Severity.NORMAL);
+}
+
+/*
+ * The severity bands, at their exact boundaries. Margin-based, so a device
+ * with a low limit is not called warm at its idle temperature.
+ */
+private void test_severity_bands() {
+    reset_fixture();
+    thermal_zone(0, "cpu-thermal", 70000);
+    thermal_trip(0, 0, "critical", 95000);   // 25 C margin -> NORMAL
+    thermal_zone(1, "gpu-thermal", 71000);
+    thermal_trip(1, 0, "critical", 95000);   // 24 C margin -> WARM
+    thermal_zone(2, "ddr-thermal", 84000);
+    thermal_trip(2, 0, "critical", 95000);   // 11 C margin -> HOT
+    thermal_zone(3, "npu-thermal", 96000);
+    thermal_trip(3, 0, "critical", 95000);   // over -> CRITICAL
+
+    var m = monitor_for_fixture();
+    assert(reading_named(m, "cpu-thermal").severity == Singularity.Severity.NORMAL);
+    assert(reading_named(m, "gpu-thermal").severity == Singularity.Severity.WARM);
+    assert(reading_named(m, "ddr-thermal").severity == Singularity.Severity.HOT);
+    assert(reading_named(m, "npu-thermal").severity == Singularity.Severity.CRITICAL);
+}
+
+/*
+ * EACH CLOCK CARRIES ITS OWN POLICY MAXIMUM.
+ *
+ * MEASURED on CIX Sky1: five cpufreq policies with five different maxima. A
+ * single machine-wide maximum would normalise the little cores against a big
+ * core ceiling and paint them permanently idle -- here the little core is at
+ * its own limit while the big core is barely off idle.
+ */
+private void test_clocks_normalise_per_policy() {
+    reset_fixture();
+    cpufreq_policy(0, 1800000, 1800000);   // little, flat out
+    cpufreq_policy(4, 1900000, 2600000);   // big, part way
+
+    var m = monitor_for_fixture();
+    var clocks = m.clocks();
+    assert(clocks.length == 2);
+    // Sorted highest kHz first, and the maximum travelled with the reading
+    // rather than being paired to the wrong policy.
+    assert(clocks[0].khz == 1900000 && clocks[0].max_khz == 2600000);
+    assert(clocks[1].khz == 1800000 && clocks[1].max_khz == 1800000);
+    assert(clocks[1].fraction == 1.0);
+    assert(clocks[0].fraction < 0.75);
+    // The kHz-only view stays in the same order for existing callers.
+    assert(m.clocks_khz()[0] == 1900000);
+}
+
+/*
+ * /proc/cpuinfo publishes a current MHz and no maximum, so those readings must
+ * report their fraction as unknown rather than inventing a denominator.
+ */
+private void test_cpuinfo_clocks_have_no_fraction() {
+    reset_fixture();
+    write_file(Path.build_filename(fixture_root, "proc", "cpuinfo"),
+               "processor\t: 0\ncpu MHz\t\t: 2400.000\n");
+
+    var m = monitor_for_fixture();
+    var clocks = m.clocks();
+    assert(clocks.length == 1);
+    assert(clocks[0].khz == 2400000);
+    assert(clocks[0].max_khz == 0);
+    assert(clocks[0].fraction == -1.0);
+}
+
+
+/*
+ * THE SHAPE OF THE SoC THIS DISTRIBUTION TARGETS.
+ *
+ * MEASURED on CIX Sky1: ONE hwmon chip named scmi_sensors carries all 22
+ * sensors, and CPU, GPU, NPU, VPU, DDR and PCB are told apart only by their
+ * labels. The chip name matches nothing in either allow-list, so before the
+ * labels were consulted this board reported cpu=-1 and gpu=-1 -- no CPU and no
+ * GPU temperature at all on the hardware the product exists for.
+ */
+private void test_scmi_labels_identify_cpu_and_gpu() {
+    reset_fixture();
+    string scmi = hwmon_chip(0, "scmi_sensors");
+    hwmon_temp(scmi, 1, 61000, "CPU_B0");
+    hwmon_temp(scmi, 2, 58000, "CPU_M1");
+    hwmon_temp(scmi, 3, 55000, "GPU_AVE");
+    hwmon_temp(scmi, 4, 71000, "DDR_top");
+    hwmon_temp(scmi, 5, 49000, "NPU");
+    hwmon_temp(scmi, 6, 47000, "PCB_AMB");
+
+    var m = monitor_for_fixture();
+    assert(m.cpu_millidegrees == 61000);
+    assert(m.gpu_millidegrees == 55000);
+    // DDR is the hottest thing on the board and must NOT become the CPU.
+    assert(m.system_millidegrees == 71000);
+    assert(reading_named(m, "NPU").kind == Singularity.SensorKind.SYSTEM);
+    assert(reading_named(m, "DDR_top").kind == Singularity.SensorKind.SYSTEM);
+}
+
+/*
+ * A VRM label contains "cpu" but is not the die. It runs hotter than the part
+ * it feeds, so with hottest-wins it would be reported as the CPU temperature
+ * and overstate it.
+ */
+private void test_vrm_labels_are_not_the_die() {
+    reset_fixture();
+    string sio = hwmon_chip(0, "nct6798");
+    hwmon_temp(sio, 1, 88000, "CPU VRM");
+    string cpu = hwmon_chip(1, "k10temp");
+    hwmon_temp(cpu, 1, 62000, "Tctl");
+
+    var m = monitor_for_fixture();
+    assert(m.cpu_millidegrees == 62000);
+    assert(reading_named(m, "VRM").kind == Singularity.SensorKind.SYSTEM);
+}
+
+/*
+ * A thermal zone that duplicates an hwmon chip by name is dropped -- but its
+ * limit is not, when hwmon published none.
+ *
+ * MEASURED on CIX Sky1: hwmon exposes four sensors named acpitz with no
+ * tempN_crit, and four identically named thermal zones each carrying a 98 C
+ * critical trip. Dropping the zones outright discarded the only real limit on
+ * the machine. All four must end up on it, not just the first: a first-match
+ * upgrade left three of them on the fallback, so one sensor was drawn against
+ * two different limits.
+ */
+private void test_thermal_limit_rescued_from_dropped_duplicate() {
+    reset_fixture();
+    string acpi = hwmon_chip(0, "acpitz");
+    hwmon_temp(acpi, 1, 44000, null);
+    hwmon_temp(acpi, 2, 43000, null);
+    thermal_zone(0, "acpitz", 44000);
+    thermal_trip(0, 0, "critical", 98000);
+    thermal_zone(1, "acpitz", 43000);
+    thermal_trip(1, 0, "critical", 98000);
+
+    var m = monitor_for_fixture();
+    int seen = 0;
+    foreach (Singularity.SensorReading r in m.readings()) {
+        if (r.label != "acpitz") {
+            continue;
+        }
+        seen++;
+        assert(r.limit_is_reported);
+        assert(r.limit_millidegrees == 98000);
+    }
+    // Still two sensors, not four: the zones were merged, not appended.
+    assert(seen == 2);
+}
+
 public int main(string[] args) {
     Test.init(ref args);
     Test.add_func("/sensor/unknown-never-cpu", test_unknown_sensors_are_never_cpu);
@@ -205,6 +485,17 @@ public int main(string[] args) {
     Test.add_func("/sensor/gpuss-is-gpu", test_gpuss_is_gpu_not_cpu);
     Test.add_func("/sensor/cpufreq-empty-falls-back", test_cpufreq_empty_dir_falls_back_to_cpuinfo);
     Test.add_func("/sensor/available-with-fan-only", test_available_with_fan_but_no_temperature);
+    Test.add_func("/sensor/sentinels-rejected", test_sentinel_temperatures_are_rejected);
+    Test.add_func("/sensor/hwmon-crit-is-limit", test_hwmon_crit_becomes_the_limit);
+    Test.add_func("/sensor/crit-beats-max", test_crit_preferred_over_max);
+    Test.add_func("/sensor/no-crit-still-limited", test_driver_without_crit_still_gets_a_limit);
+    Test.add_func("/sensor/lowest-critical-trip", test_thermal_uses_lowest_critical_trip);
+    Test.add_func("/sensor/severity-bands", test_severity_bands);
+    Test.add_func("/sensor/clocks-per-policy", test_clocks_normalise_per_policy);
+    Test.add_func("/sensor/cpuinfo-no-fraction", test_cpuinfo_clocks_have_no_fraction);
+    Test.add_func("/sensor/scmi-labels-classify", test_scmi_labels_identify_cpu_and_gpu);
+    Test.add_func("/sensor/vrm-is-not-the-die", test_vrm_labels_are_not_the_die);
+    Test.add_func("/sensor/limit-rescued-from-duplicate", test_thermal_limit_rescued_from_dropped_duplicate);
     int rc = Test.run();
     if (fixture_root != null && FileUtils.test(fixture_root, FileTest.EXISTS)) {
         remove_path(File.new_for_path(fixture_root));

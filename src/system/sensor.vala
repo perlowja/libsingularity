@@ -8,16 +8,117 @@ namespace Singularity {
         SYSTEM
     }
 
+    /**
+     * How close a sensor is to the temperature the hardware acts on.
+     *
+     * Banded by THERMAL MARGIN -- degrees still available before the limit --
+     * and not by a fraction of it. A fraction misreads every device whose
+     * limit is not near 100 C: an NVMe with an 84 C critical trip would be
+     * called warm at 63 C, which is its ordinary idle temperature.
+     */
+    public enum Severity {
+        NORMAL,
+        WARM,
+        HOT,
+        CRITICAL
+    }
+
+    /**
+     * Turns a temperature plus a limit into a Severity.
+     *
+     * THE FALLBACK LIMITS ARE LOAD-BEARING, NOT DECORATION. Surveyed across
+     * eight fleet machines, the drivers that matter most are precisely the
+     * ones that advertise no limit at all: k10temp (Ryzen), scmi (CIX Sky1)
+     * and cpu_thermal (Pi and most Arm SoCs) publish tempN_input with no
+     * tempN_crit and no critical trip point. Colouring only the sensors that
+     * declare a limit would therefore leave the CPU -- the one sensor a user
+     * actually watches -- permanently uncoloured on both Arm and AMD.
+     */
+    namespace Thresholds {
+        /** Margin at or above which a sensor is unremarkable. */
+        public const int NORMAL_MARGIN_MILLIDEGREES = 25000;
+        /** Margin at or above which a sensor is warm but not yet notable. */
+        public const int WARM_MARGIN_MILLIDEGREES = 12000;
+
+        public int fallback_limit(SensorKind kind) {
+            switch (kind) {
+                // Tctl on Zen throttles at 95 and Arm SoC critical trips sit
+                // at 105, so 100 is the middle of the range the fleet has.
+                case SensorKind.CPU: return 100000;
+                // NVIDIA slows at 83 and shuts down in the low 90s; the
+                // Mali-G720 on Sky1 trips at 95.
+                case SensorKind.GPU: return 95000;
+                // Board, NIC and NVMe sensors. Anything with a real limit --
+                // and an NVMe almost always publishes one -- overrides this.
+                default: return 85000;
+            }
+        }
+
+        public Severity classify(int millidegrees, int limit_millidegrees) {
+            if (limit_millidegrees <= 0) {
+                return Severity.NORMAL;
+            }
+            int margin = limit_millidegrees - millidegrees;
+            if (margin <= 0) {
+                return Severity.CRITICAL;
+            }
+            if (margin < WARM_MARGIN_MILLIDEGREES) {
+                return Severity.HOT;
+            }
+            if (margin < NORMAL_MARGIN_MILLIDEGREES) {
+                return Severity.WARM;
+            }
+            return Severity.NORMAL;
+        }
+    }
+
     /** One temperature sensor, as reported by the kernel. */
     public class SensorReading : Object {
         public string label { get; private set; }
         public int millidegrees { get; private set; }
         public SensorKind kind { get; private set; }
 
-        public SensorReading(string label, int millidegrees, SensorKind kind) {
+        /**
+         * Temperature at which the hardware acts, in millidegrees.
+         *
+         * Taken from the driver when it publishes one and from
+         * Thresholds.fallback_limit() when it does not, so it is never zero
+         * and a caller can always draw a margin.
+         */
+        public int limit_millidegrees { get; private set; }
+
+        /**
+         * True when the driver published the limit, false when it came from
+         * Thresholds.fallback_limit().
+         *
+         * Needed because a reported limit is worth keeping when two sources
+         * describe the same sensor -- see the dedup in refresh_internal().
+         */
+        public bool limit_is_reported { get; private set; }
+
+        public Severity severity { get; private set; }
+
+        /** Degrees still available before limit_millidegrees. */
+        public int margin_millidegrees {
+            get { return limit_millidegrees - millidegrees; }
+        }
+
+        /**
+         * The limit argument is optional so that every existing caller --
+         * including the NVIDIA path, which has no sysfs node to read a limit
+         * from -- keeps compiling and falls back by kind.
+         */
+        public SensorReading(string label, int millidegrees, SensorKind kind,
+                             int limit_millidegrees = 0) {
             this.label = label;
             this.millidegrees = millidegrees;
             this.kind = kind;
+            this.limit_is_reported = limit_millidegrees > 0;
+            this.limit_millidegrees = this.limit_is_reported
+                ? limit_millidegrees
+                : Thresholds.fallback_limit(kind);
+            this.severity = Thresholds.classify(millidegrees,
+                                                this.limit_millidegrees);
         }
     }
 
@@ -40,6 +141,40 @@ namespace Singularity {
         public FanReading(string label, int rpm) {
             this.label = label;
             this.rpm = rpm;
+        }
+    }
+
+    /**
+     * One cpufreq policy's current clock, with the maximum that policy can
+     * reach.
+     *
+     * The maximum travels WITH the reading because it is not one number per
+     * machine. CIX Sky1 exposes five cpufreq policies with five different
+     * maxima, so 2.1 GHz is near-idle on one cluster and flat out on another.
+     * Normalising against a single machine-wide maximum would paint the
+     * little cores as permanently idle.
+     */
+    public class ClockReading : Object {
+        public string label { get; private set; }
+        public int khz { get; private set; }
+        /** 0 when the policy publishes no maximum. */
+        public int max_khz { get; private set; }
+
+        public ClockReading(string label, int khz, int max_khz) {
+            this.label = label;
+            this.khz = khz;
+            this.max_khz = max_khz;
+        }
+
+        /** 0.0 to 1.0 of this policy's maximum; -1.0 when unknown. */
+        public double fraction {
+            get {
+                if (max_khz <= 0) {
+                    return -1.0;
+                }
+                double f = (double) khz / (double) max_khz;
+                return f > 1.0 ? 1.0 : f;
+            }
         }
     }
 
@@ -105,6 +240,77 @@ namespace Singularity {
          */
         public string sysfs_root { get; set; default = ""; }
 
+        /**
+         * Upper bound on a believable temperature, in millidegrees.
+         *
+         * MEASURED: a fleet host reported 65261850 -- 65261 C -- from a hwmon
+         * node. That is a sentinel, not a temperature, and without a ceiling
+         * it becomes the hottest sensor on the machine and pins every summary
+         * and every colour to itself.
+         */
+        private const int MAX_PLAUSIBLE_MILLIDEGREES = 150000;
+
+        /**
+         * The lower bound stays at "greater than zero": the same survey saw
+         * -274000, which is below absolute zero and so unambiguously a
+         * sentinel as well.
+         */
+        private static bool plausible(int millidegrees) {
+            return millidegrees > 0
+                && millidegrees <= MAX_PLAUSIBLE_MILLIDEGREES;
+        }
+
+        /**
+         * The temperature this hwmon sensor is acted on at, or 0.
+         *
+         * tempN_crit first and tempN_max second: _crit is the hard limit,
+         * while _max is frequently a soft target the chip sits at under full
+         * load. Treating the soft one as critical would report a merely busy
+         * CPU as overheating.
+         */
+        private int hwmon_limit(string base_path, string stem) {
+            foreach (string suffix in new string[] { "_crit", "_max" }) {
+                string? raw = read_first_line(base_path + "/" + stem + suffix);
+                if (raw == null) {
+                    continue;
+                }
+                int value = int.parse(raw);
+                if (plausible(value)) {
+                    return value;
+                }
+            }
+            return 0;
+        }
+
+        /**
+         * The lowest critical trip point of a thermal zone, or 0.
+         *
+         * "critical" is preferred over "hot" because critical is the trip the
+         * kernel powers the machine off at, where hot is an intermediate
+         * notification. The LOWEST is taken because a zone may publish several
+         * and the first one reached is the one that matters.
+         */
+        private int thermal_limit(string base_path) {
+            int best = 0;
+            for (int i = 0; i < 16; i++) {
+                string? trip_type = read_first_line(
+                    "%s/trip_point_%d_type".printf(base_path, i));
+                if (trip_type == null || trip_type.strip().down() != "critical") {
+                    continue;
+                }
+                string? raw = read_first_line(
+                    "%s/trip_point_%d_temp".printf(base_path, i));
+                if (raw == null) {
+                    continue;
+                }
+                int value = int.parse(raw);
+                if (plausible(value) && (best == 0 || value < best)) {
+                    best = value;
+                }
+            }
+            return best;
+        }
+
         private string hwmon_dir() { return sysfs_root + HWMON_DIR; }
         private string thermal_dir() { return sysfs_root + THERMAL_DIR; }
         private string cpufreq_dir() { return sysfs_root + CPUFREQ_DIR; }
@@ -124,8 +330,34 @@ namespace Singularity {
             "armada_thermal", "imx_thermal", "sun4i-ts", "scpi-sensors"
         };
         // hwmon label text that identifies a CPU package or core.
+        //
+        // Bare "cpu" is here for the same reason it is in CPU_CHIPS: a sensor
+        // that spells out CPU is a CPU sensor. It is load-bearing on every
+        // Arm SystemReady board, where the identity is in the LABEL and never
+        // in the chip name. MEASURED on CIX Sky1: one hwmon chip named
+        // scmi_sensors carries all 22 sensors, and the CPU ones are told apart
+        // only by their labels CPU_B0, CPU_B1, CPU_M0, CPU_M1. Without this
+        // the panel reported cpu=-1 on the SoC this distribution targets.
         private const string[] CPU_LABELS = {
-            "package id", "tctl", "tdie", "tccd", "core "
+            "package id", "tctl", "tdie", "tccd", "core ", "cpu"
+        };
+        // hwmon label text that identifies a GPU. Same reasoning: on Sky1 the
+        // GPU is scmi_sensors GPU_AVE / GPU_top / GPU_btm.
+        private const string[] GPU_LABELS = {
+            "gpu"
+        };
+        /*
+         * Labels that name the REGULATOR rather than the die.
+         *
+         * A desktop Super-I/O chip labels its VRM sensors "CPU VRM" and
+         * "GPU VRM". Those contain "cpu" and "gpu" but run hotter than the
+         * part they feed, so with hottest-wins they would be reported as the
+         * CPU temperature and overstate it. Excluded rather than ranked --
+         * ranking would need a notion of which sensor is more authoritative,
+         * which sysfs does not provide.
+         */
+        private const string[] NOT_DIE_LABELS = {
+            "vrm", "vrout", "vddq", "ambient"
         };
         private const string[] GPU_CHIPS = {
             "amdgpu", "radeon", "nouveau", "i915", "xe",
@@ -144,6 +376,7 @@ namespace Singularity {
         // Sysfs-derived readings only, without the NVIDIA set merged in.
         private SensorReading[] _base_readings = {};
         private int[] _clocks_khz = {};
+        private ClockReading[] _clocks = {};
         private FanReading[] _fans = {};
         private PowerReading[] _power = {};
         private SensorReading[] _nvidia_readings = {};
@@ -206,6 +439,18 @@ namespace Singularity {
         /** Current CPU clocks in kHz, highest first. */
         public int[] clocks_khz() {
             return _clocks_khz;
+        }
+
+        /**
+         * The same clocks, each carrying the maximum of the cpufreq policy it
+         * came from. Ordered to match clocks_khz().
+         *
+         * Kept alongside clocks_khz() rather than replacing it: a bare kHz
+         * list is all a caller printing a number needs, and changing that
+         * return type would break every existing one.
+         */
+        public ClockReading[] clocks() {
+            return _clocks;
         }
 
         /**
@@ -285,8 +530,14 @@ namespace Singularity {
             if (matches_any(chip, CPU_CHIPS)) {
                 return SensorKind.CPU;
             }
-            if (label != null && matches_any(label, CPU_LABELS)) {
-                return SensorKind.CPU;
+            if (label != null && !matches_any(label, NOT_DIE_LABELS)) {
+                // GPU before CPU, matching the order of the chip checks.
+                if (matches_any(label, GPU_LABELS)) {
+                    return SensorKind.GPU;
+                }
+                if (matches_any(label, CPU_LABELS)) {
+                    return SensorKind.CPU;
+                }
             }
             // Unknown is SYSTEM on purpose. See the class comment.
             return SensorKind.SYSTEM;
@@ -320,7 +571,7 @@ namespace Singularity {
                         continue;
                     }
                     int millidegrees = int.parse(raw);
-                    if (millidegrees <= 0) {
+                    if (!plausible(millidegrees)) {
                         continue;
                     }
                     string stem = entry.substring(0, entry.length - "_input".length);
@@ -328,7 +579,9 @@ namespace Singularity {
                     string name = (label != null && label != "")
                         ? "%s %s".printf(chip, label)
                         : chip;
-                    found += new SensorReading(name, millidegrees, classify(chip, label));
+                    found += new SensorReading(name, millidegrees,
+                                               classify(chip, label),
+                                               hwmon_limit(base_path, stem));
                 }
             }
             return found;
@@ -354,10 +607,12 @@ namespace Singularity {
                     continue;
                 }
                 int millidegrees = int.parse(raw);
-                if (millidegrees <= 0) {
+                if (!plausible(millidegrees)) {
                     continue;
                 }
-                found += new SensorReading(zone_type, millidegrees, classify(zone_type, null));
+                found += new SensorReading(zone_type, millidegrees,
+                                           classify(zone_type, null),
+                                           thermal_limit(base_path));
             }
             return found;
         }
@@ -487,12 +742,19 @@ namespace Singularity {
          * absent (common on virtual machines and on x86 with no scaling driver)
          * or because it exists but is empty / has no readable scaling_cur_freq.
          */
-        private int[] clocks_from_cpuinfo() {
-            int[] found = {};
+        /**
+         * Clocks with no maximum attached: /proc/cpuinfo reports the current
+         * MHz and nothing else, so these readings are deliberately built with
+         * max_khz 0 and a caller must treat their fraction as unknown rather
+         * than inventing a denominator.
+         */
+        private ClockReading[] clocks_from_cpuinfo() {
+            ClockReading[] found = {};
             string? cpuinfo = read_first_line(cpuinfo_path());
             if (cpuinfo == null) {
                 return found;
             }
+            int index = 0;
             foreach (string line in cpuinfo.split("\n")) {
                 if (!line.down().has_prefix("cpu mhz")) {
                     continue;
@@ -503,14 +765,38 @@ namespace Singularity {
                 }
                 int mhz = (int) double.parse(parts[1].strip());
                 if (mhz > 0) {
-                    found += mhz * 1000;
+                    found += new ClockReading("cpu%d".printf(index), mhz * 1000, 0);
+                    index++;
                 }
             }
             return found;
         }
 
-        private int[] collect_clocks() {
-            int[] found = {};
+        /**
+         * This policy's ceiling, in kHz, or 0.
+         *
+         * cpuinfo_max_freq is the hardware maximum; scaling_max_freq is what
+         * the governor is currently allowed to use and can be lowered at
+         * runtime. The hardware number is the honest denominator -- against
+         * scaling_max_freq a thermally capped core would read as 100% busy.
+         */
+        private int policy_max_khz(string policy_path) {
+            foreach (string name in new string[] { "cpuinfo_max_freq",
+                                                   "scaling_max_freq" }) {
+                string? raw = read_first_line(policy_path + "/" + name);
+                if (raw == null) {
+                    continue;
+                }
+                int khz = int.parse(raw);
+                if (khz > 0) {
+                    return khz;
+                }
+            }
+            return 0;
+        }
+
+        private ClockReading[] collect_clocks() {
+            ClockReading[] found = {};
             Dir dir;
             try {
                 dir = Dir.open(cpufreq_dir(), 0);
@@ -522,13 +808,14 @@ namespace Singularity {
                 if (!node.has_prefix("policy")) {
                     continue;
                 }
-                string? raw = read_first_line(cpufreq_dir() + "/" + node + "/scaling_cur_freq");
+                string policy_path = cpufreq_dir() + "/" + node;
+                string? raw = read_first_line(policy_path + "/scaling_cur_freq");
                 if (raw == null) {
                     continue;
                 }
                 int khz = int.parse(raw);
                 if (khz > 0) {
-                    found += khz;
+                    found += new ClockReading(node, khz, policy_max_khz(policy_path));
                 }
             }
             // A present cpufreq directory can still yield nothing: no policy*
@@ -582,7 +869,13 @@ namespace Singularity {
                 }
                 string name = fields[0].strip();
                 int celsius = int.parse(fields[1].strip());
-                if (celsius <= 0) {
+                // The same ceiling as sysfs. nvidia-smi also reports the
+                // absolute die temperature on every generation here -- do NOT
+                // switch this query to temperature.gpu.tlimit, which on Ada is
+                // degrees BELOW the throttle point while Turing reports an
+                // absolute value, so one field would mean two different things
+                // across the fleet.
+                if (!plausible(celsius * 1000)) {
                     continue;
                 }
                 found += new SensorReading(name, celsius * 1000, SensorKind.GPU);
@@ -674,14 +967,34 @@ namespace Singularity {
             // Thermal zones that merely duplicate an hwmon chip are dropped.
             SensorReading[] found = collect_hwmon();
             foreach (SensorReading zone in collect_thermal()) {
+                // The two interfaces do not carry the same information.
+                // MEASURED on CIX Sky1: hwmon publishes acpitz with no
+                // tempN_crit at all, while the identically named thermal zone
+                // publishes a 98 C critical trip. Dropping the zone outright
+                // therefore threw away the only real limit on the machine and
+                // left the sensor on a guess.
+                //
+                // The scan prefers an entry that still lacks a reported limit,
+                // rather than stopping at the first name match. Sky1 presents
+                // FOUR sensors all called acpitz and four zones to match; a
+                // first-match rule upgraded one of them and left the other
+                // three on the fallback, so the same sensor was drawn against
+                // two different limits.
+                int upgrade_index = -1;
                 bool duplicate = false;
-                foreach (SensorReading existing in found) {
-                    if (same_sensor(existing.label, zone.label)) {
-                        duplicate = true;
+                for (int i = 0; i < found.length; i++) {
+                    if (!same_sensor(found[i].label, zone.label)) {
+                        continue;
+                    }
+                    duplicate = true;
+                    if (!found[i].limit_is_reported && zone.limit_is_reported) {
+                        upgrade_index = i;
                         break;
                     }
                 }
-                if (!duplicate) {
+                if (upgrade_index >= 0) {
+                    found[upgrade_index] = zone;
+                } else if (!duplicate) {
                     found += zone;
                 }
             }
@@ -700,20 +1013,28 @@ namespace Singularity {
             _fans = collect_fans();
             _power = collect_power();
 
-            int[] clocks = collect_clocks();
+            ClockReading[] clocks = collect_clocks();
             // Highest first, so a caller can take element 0 as "the" clock.
+            // The whole reading is swapped, not the kHz alone: each carries
+            // its own policy maximum and separating the two would normalise a
+            // big core against a little core's ceiling.
             if (clocks.length > 1) {
                 for (int i = 0; i < clocks.length; i++) {
                     for (int j = i + 1; j < clocks.length; j++) {
-                        if (clocks[j] > clocks[i]) {
-                            int swap = clocks[i];
+                        if (clocks[j].khz > clocks[i].khz) {
+                            ClockReading swap = clocks[i];
                             clocks[i] = clocks[j];
                             clocks[j] = swap;
                         }
                     }
                 }
             }
-            _clocks_khz = clocks;
+            _clocks = clocks;
+            int[] khz_only = {};
+            foreach (ClockReading clock in clocks) {
+                khz_only += clock.khz;
+            }
+            _clocks_khz = khz_only;
 
             publish_state();
         }
