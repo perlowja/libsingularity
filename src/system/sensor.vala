@@ -130,6 +130,15 @@ namespace Singularity {
 
         public Severity severity { get; private set; }
 
+        /**
+         * True when the driver gave this sensor a name of its own (a hwmon
+         * tempN_label), false when all we have is the chip or zone name.
+         *
+         * Used to break ties between two sources describing the same silicon:
+         * a labelled reading is the more specific one. See refresh_internal().
+         */
+        public bool is_labelled { get; private set; }
+
         /** Degrees still available before limit_millidegrees. */
         public int margin_millidegrees {
             get { return limit_millidegrees - millidegrees; }
@@ -170,7 +179,8 @@ namespace Singularity {
          * from -- keeps compiling and falls back by kind.
          */
         public SensorReading(string label, int millidegrees, SensorKind kind,
-                             int limit_millidegrees = 0) {
+                             int limit_millidegrees = 0, bool is_labelled = false) {
+            this.is_labelled = is_labelled;
             this.label = label;
             this.millidegrees = millidegrees;
             this.kind = kind;
@@ -687,7 +697,8 @@ namespace Singularity {
                         : chip;
                     found += new SensorReading(name, millidegrees,
                                                classify(chip, label),
-                                               hwmon_limit(base_path, stem));
+                                               hwmon_limit(base_path, stem),
+                                               label != null && label != "");
                 }
             }
             return found;
@@ -984,7 +995,8 @@ namespace Singularity {
                 if (!plausible(celsius * 1000)) {
                     continue;
                 }
-                found += new SensorReading(name, celsius * 1000, SensorKind.GPU);
+                found += new SensorReading(name, celsius * 1000, SensorKind.GPU,
+                                           0, true);
                 if (fields.length >= 4) {
                     // Fields can read "[N/A]" -- an integrated Thor GPU reports
                     // no SM clock. double.parse yields 0 there, which the
@@ -1104,6 +1116,48 @@ namespace Singularity {
                     found += zone;
                 }
             }
+            // PREFER THE LABELLED SOURCE WHEN TWO DESCRIBE THE SAME SILICON.
+            //
+            // MEASURED on CIX Sky1 with SCMI sensors enabled: the SoC reports
+            // its CPU and GPU twice, once through scmi_sensors with real
+            // labels and once as bare ACPI thermal zones, and the pairs are
+            // identical to the degree --
+            //
+            //     TZB0 47.0  ==  scmi_sensors CPU_B0 47.0
+            //     TZM0 46.0  ==  scmi_sensors CPU_M0 46.0
+            //     TZGT 44.0  ==  scmi_sensors GPU_AVE 44.0
+            //
+            // -- so the panel drew eight CPU rows for four sensors. Drop the
+            // unlabelled twin: a reading the driver bothered to name is the
+            // more specific description of the same thing.
+            //
+            // Deliberately NARROW. It requires the same kind AND the exact
+            // same temperature, rather than dropping ACPI zones wholesale,
+            // because plenty of unlabelled sensors are genuinely independent
+            // -- both r8169 NICs on this board are unlabelled and must
+            // survive. The trade is that two distinct same-kind sensors
+            // reading identically for one tick will briefly show as one; that
+            // is a cosmetic loss, where dropping a real sensor outright is
+            // not.
+            SensorReading[] deduped = {};
+            foreach (SensorReading candidate in found) {
+                bool shadowed = false;
+                if (!candidate.is_labelled) {
+                    foreach (SensorReading other in found) {
+                        if (other.is_labelled
+                            && other.kind == candidate.kind
+                            && other.millidegrees == candidate.millidegrees) {
+                            shadowed = true;
+                            break;
+                        }
+                    }
+                }
+                if (!shadowed) {
+                    deduped += candidate;
+                }
+            }
+            found = deduped;
+
             // Keep the sysfs-derived set separate from the NVIDIA set: when the
             // async query lands, publish_state() can merge the two again without
             // re-walking every hwmon and thermal node.

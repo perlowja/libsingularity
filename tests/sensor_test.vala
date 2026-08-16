@@ -100,6 +100,22 @@ private void reset_fixture() {
     }
 }
 
+/**
+ * A monitor configured the way the NCZ shell configures it on Sky1 -- with the
+ * ACPI-zone hints set. The dedup rule only has anything to compare when those
+ * zones are classified as CPU/GPU rather than falling through to SYSTEM, so a
+ * test of that rule must model the shipping configuration, not the bare
+ * default.
+ */
+private Singularity.SensorMonitor monitor_for_sky1_fixture() {
+    var m = new Singularity.SensorMonitor();
+    m.sysfs_root = fixture_root;
+    m.gpu_hint = "TZGT";
+    m.cpu_hint = "TZ";
+    m.refresh();
+    return m;
+}
+
 private Singularity.SensorMonitor monitor_for_fixture() {
     var m = new Singularity.SensorMonitor();
     m.sysfs_root = fixture_root;
@@ -580,6 +596,64 @@ private void test_vpu_and_npu_are_not_the_gpu() {
     assert(m.gpu_millidegrees == 40000);
 }
 
+
+/*
+ * A labelled reading shadows its unlabelled twin.
+ *
+ * MEASURED on CIX Sky1: the SoC reports CPU and GPU twice, once through
+ * scmi_sensors with labels and once as bare ACPI zones, identical to the
+ * degree -- TZB0 47.0 == CPU_B0 47.0, TZGT 44.0 == GPU_AVE 44.0. The panel
+ * drew eight CPU rows for four sensors.
+ */
+private void test_labelled_reading_shadows_unlabelled_twin() {
+    reset_fixture();
+    string scmi = hwmon_chip(0, "scmi_sensors");
+    hwmon_temp(scmi, 1, 47000, "CPU_B0");
+    hwmon_temp(scmi, 2, 44000, "GPU_AVE");
+    string tzb = hwmon_chip(1, "TZB0");   // same silicon, no label
+    hwmon_temp(tzb, 1, 47000, null);
+    string tzgt = hwmon_chip(2, "TZGT");
+    hwmon_temp(tzgt, 1, 44000, null);
+
+    var m = monitor_for_sky1_fixture();
+    // The named ones survive; the bare zones do not.
+    assert(reading_named(m, "CPU_B0") != null);
+    assert(reading_named(m, "GPU_AVE") != null);
+    assert(reading_named(m, "TZB0") == null);
+    assert(reading_named(m, "TZGT") == null);
+}
+
+/*
+ * THE OTHER DIRECTION, which is what keeps the rule honest.
+ *
+ * An unlabelled sensor with no labelled same-kind twin at the same
+ * temperature must survive. Both r8169 NICs on this board are unlabelled and
+ * genuinely independent; a rule that dropped ACPI zones wholesale, or matched
+ * on kind alone, would delete real sensors.
+ */
+private void test_independent_unlabelled_sensors_survive() {
+    reset_fixture();
+    string scmi = hwmon_chip(0, "scmi_sensors");
+    hwmon_temp(scmi, 1, 47000, "CPU_B0");
+    // Same kind, DIFFERENT temperature -> not a twin, must survive.
+    string tzb = hwmon_chip(1, "TZB0");
+    hwmon_temp(tzb, 1, 52000, null);
+    // No labelled NETWORK sensor exists at all -> both NICs must survive.
+    string nic1 = hwmon_chip(2, "r8169_0_100:00");
+    hwmon_temp(nic1, 1, 48000, null);
+    string nic2 = hwmon_chip(3, "r8169_0_3100:00");
+    hwmon_temp(nic2, 1, 48000, null);
+
+    var m = monitor_for_sky1_fixture();
+    assert(reading_named(m, "CPU_B0") != null);
+    assert(reading_named(m, "TZB0") != null);
+    int nics = 0;
+    foreach (Singularity.SensorReading r in m.readings()) {
+        if (r.kind == Singularity.SensorKind.NETWORK) nics++;
+    }
+    assert(nics == 2);
+}
+
 public int main(string[] args) {
     Test.init(ref args);
     Test.add_func("/sensor/unknown-never-cpu", test_unknown_sensors_are_never_cpu);
@@ -604,6 +678,8 @@ public int main(string[] args) {
     Test.add_func("/sensor/heat-fraction-clamped", test_heat_fraction_is_clamped);
     Test.add_func("/sensor/soc-groups-by-component", test_soc_sensors_group_by_component);
     Test.add_func("/sensor/vpu-npu-not-gpu", test_vpu_and_npu_are_not_the_gpu);
+    Test.add_func("/sensor/labelled-shadows-twin", test_labelled_reading_shadows_unlabelled_twin);
+    Test.add_func("/sensor/independent-unlabelled-survive", test_independent_unlabelled_sensors_survive);
     int rc = Test.run();
     if (fixture_root != null && FileUtils.test(fixture_root, FileTest.EXISTS)) {
         remove_path(File.new_for_path(fixture_root));
