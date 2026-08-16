@@ -419,9 +419,12 @@ private void test_scmi_labels_identify_cpu_and_gpu() {
     assert(m.cpu_millidegrees == 61000);
     assert(m.gpu_millidegrees == 55000);
     // DDR is the hottest thing on the board and must NOT become the CPU.
-    assert(m.system_millidegrees == 71000);
-    assert(reading_named(m, "NPU").kind == Singularity.SensorKind.SYSTEM);
-    assert(reading_named(m, "DDR_top").kind == Singularity.SensorKind.SYSTEM);
+    // It is now named MEMORY rather than dumped in SYSTEM, but the property
+    // this test exists for is unchanged: it is not the CPU and not the GPU.
+    assert(reading_named(m, "DDR_top").kind == Singularity.SensorKind.MEMORY);
+    assert(reading_named(m, "NPU").kind == Singularity.SensorKind.NPU);
+    assert(m.cpu_millidegrees != 71000);
+    assert(m.gpu_millidegrees != 71000);
 }
 
 /*
@@ -476,6 +479,107 @@ private void test_thermal_limit_rescued_from_dropped_duplicate() {
     assert(seen == 2);
 }
 
+
+/*
+ * heat_fraction spans AMBIENT to the limit, not 0 C to the limit.
+ *
+ * MEASURED on O6N: the CPU at 49 C against a 100 C limit and the NVMe at
+ * 67.8 C against 84.85 C. From ambient those separate clearly (0.36 vs 0.73)
+ * and the drive is obviously the one to look at; measured from 0 C they would
+ * be 0.49 and 0.80, close enough that a glance at two bars tells you little.
+ */
+private void test_heat_fraction_spans_from_ambient() {
+    reset_fixture();
+    thermal_zone(0, "cpu-thermal", 49000);
+    thermal_trip(0, 0, "critical", 100000);
+    string nvme = hwmon_chip(0, "nvme");
+    hwmon_temp(nvme, 1, 67800, "Composite");
+    write_file(Path.build_filename(nvme, "temp1_crit"), "84850\n");
+
+    var m = monitor_for_fixture();
+    double cpu = reading_named(m, "cpu-thermal").heat_fraction;
+    double drive = reading_named(m, "Composite").heat_fraction;
+    // (49-20)/(100-20) = 0.3625 ; (67.8-20)/(84.85-20) = 0.7370
+    assert(cpu > 0.35 && cpu < 0.38);
+    assert(drive > 0.72 && drive < 0.75);
+    // The whole point: the drive must read visibly hotter than the CPU.
+    assert(drive - cpu > 0.3);
+}
+
+/*
+ * Clamped at both ends -- a sensor below ambient must not draw a negative bar,
+ * and one past its limit must not overflow it.
+ */
+private void test_heat_fraction_is_clamped() {
+    reset_fixture();
+    thermal_zone(0, "cold-thermal", 5000);
+    thermal_trip(0, 0, "critical", 90000);
+    thermal_zone(1, "hot-thermal", 99000);
+    thermal_trip(1, 0, "critical", 90000);
+
+    var m = monitor_for_fixture();
+    assert(reading_named(m, "cold-thermal").heat_fraction == 0.0);
+    assert(reading_named(m, "hot-thermal").heat_fraction == 1.0);
+}
+
+
+/*
+ * THE GROUPING THE PANEL ACTUALLY HAS TO RENDER.
+ *
+ * Every label here is one Sky1 reports through scmi_sensors, plus the NVMe and
+ * NIC chips that sit alongside. Before the kinds were widened, all of these
+ * except the CPU and GPU entries landed in SYSTEM -- 17 of 25 readings in one
+ * capped list.
+ */
+private void test_soc_sensors_group_by_component() {
+    reset_fixture();
+    string scmi = hwmon_chip(0, "scmi_sensors");
+    hwmon_temp(scmi, 1,  61000, "CPU_B0");
+    hwmon_temp(scmi, 2,  55000, "GPU_AVE");
+    hwmon_temp(scmi, 3,  49000, "NPU");
+    hwmon_temp(scmi, 4,  47000, "VPU");
+    hwmon_temp(scmi, 5,  71000, "DDR_top");
+    hwmon_temp(scmi, 6,  46000, "PCB_AMB");
+    hwmon_temp(scmi, 7,  48000, "SOC_TRC");
+    string nvme = hwmon_chip(1, "nvme");
+    hwmon_temp(nvme, 1,  67000, "Composite");
+    string nic = hwmon_chip(2, "r8169_0_100:00");
+    hwmon_temp(nic, 1,   48000, null);
+
+    var m = monitor_for_fixture();
+    assert(reading_named(m, "CPU_B0").kind    == Singularity.SensorKind.CPU);
+    assert(reading_named(m, "GPU_AVE").kind   == Singularity.SensorKind.GPU);
+    assert(reading_named(m, "NPU").kind       == Singularity.SensorKind.NPU);
+    assert(reading_named(m, "VPU").kind       == Singularity.SensorKind.VPU);
+    assert(reading_named(m, "DDR_top").kind   == Singularity.SensorKind.MEMORY);
+    assert(reading_named(m, "PCB_AMB").kind   == Singularity.SensorKind.BOARD);
+    assert(reading_named(m, "SOC_TRC").kind   == Singularity.SensorKind.BOARD);
+    assert(reading_named(m, "Composite").kind == Singularity.SensorKind.STORAGE);
+    assert(reading_named(m, "r8169").kind     == Singularity.SensorKind.NETWORK);
+    // Nothing may fall through to SYSTEM on this board any more.
+    foreach (Singularity.SensorReading r in m.readings()) {
+        assert(r.kind != Singularity.SensorKind.SYSTEM);
+    }
+}
+
+/*
+ * "VPU" must not be read as a GPU, and the NPU must not be read as either.
+ * Both would be swallowed by a broader match if the order were wrong.
+ */
+private void test_vpu_and_npu_are_not_the_gpu() {
+    reset_fixture();
+    string scmi = hwmon_chip(0, "scmi_sensors");
+    hwmon_temp(scmi, 1, 90000, "VPU");
+    hwmon_temp(scmi, 2, 91000, "NPU");
+    hwmon_temp(scmi, 3, 40000, "GPU_AVE");
+
+    var m = monitor_for_fixture();
+    assert(reading_named(m, "VPU").kind == Singularity.SensorKind.VPU);
+    assert(reading_named(m, "NPU").kind == Singularity.SensorKind.NPU);
+    // The GPU figure must be the GPU, not the much hotter VPU next to it.
+    assert(m.gpu_millidegrees == 40000);
+}
+
 public int main(string[] args) {
     Test.init(ref args);
     Test.add_func("/sensor/unknown-never-cpu", test_unknown_sensors_are_never_cpu);
@@ -496,6 +600,10 @@ public int main(string[] args) {
     Test.add_func("/sensor/scmi-labels-classify", test_scmi_labels_identify_cpu_and_gpu);
     Test.add_func("/sensor/vrm-is-not-the-die", test_vrm_labels_are_not_the_die);
     Test.add_func("/sensor/limit-rescued-from-duplicate", test_thermal_limit_rescued_from_dropped_duplicate);
+    Test.add_func("/sensor/heat-fraction-from-ambient", test_heat_fraction_spans_from_ambient);
+    Test.add_func("/sensor/heat-fraction-clamped", test_heat_fraction_is_clamped);
+    Test.add_func("/sensor/soc-groups-by-component", test_soc_sensors_group_by_component);
+    Test.add_func("/sensor/vpu-npu-not-gpu", test_vpu_and_npu_are_not_the_gpu);
     int rc = Test.run();
     if (fixture_root != null && FileUtils.test(fixture_root, FileTest.EXISTS)) {
         remove_path(File.new_for_path(fixture_root));

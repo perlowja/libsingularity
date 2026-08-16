@@ -2,9 +2,28 @@ using GLib;
 
 namespace Singularity {
 
+    /**
+     * What a sensor is measuring.
+     *
+     * Finer than CPU/GPU/SYSTEM because a modern SoC reports far more than
+     * three things, and lumping the rest together makes the list unreadable.
+     * MEASURED on CIX Sky1 once SCMI sensors were enabled: 25 readings, of
+     * which 17 fell into SYSTEM -- NPU, VPU, two DDR, two SOC, an
+     * interconnect, six PCB points, three NVMe and two NICs, all in one capped
+     * list where the only way to see the drive was to widen the cap.
+     *
+     * SYSTEM stays the honest fallback for anything unrecognised; the
+     * allow-list doctrine is unchanged, this only widens what can be named.
+     */
     public enum SensorKind {
         CPU,
         GPU,
+        NPU,
+        VPU,
+        MEMORY,
+        STORAGE,
+        NETWORK,
+        BOARD,
         SYSTEM
     }
 
@@ -34,6 +53,13 @@ namespace Singularity {
      * declare a limit would therefore leave the CPU -- the one sensor a user
      * actually watches -- permanently uncoloured on both Arm and AMD.
      */
+    /**
+     * Room temperature, the floor a heat bar is drawn from. Not a threshold --
+     * nothing is judged against it, it only stops idle sensors from all
+     * rendering half-full. See SensorReading.heat_fraction.
+     */
+    public const int AMBIENT_MILLIDEGREES = 20000;
+
     namespace Thresholds {
         /** Margin at or above which a sensor is unremarkable. */
         public const int NORMAL_MARGIN_MILLIDEGREES = 25000;
@@ -48,8 +74,14 @@ namespace Singularity {
                 // NVIDIA slows at 83 and shuts down in the low 90s; the
                 // Mali-G720 on Sky1 trips at 95.
                 case SensorKind.GPU: return 95000;
-                // Board, NIC and NVMe sensors. Anything with a real limit --
-                // and an NVMe almost always publishes one -- overrides this.
+                // Accelerators share the die with the GPU and throttle in
+                // the same range.
+                case SensorKind.NPU:
+                case SensorKind.VPU: return 95000;
+                // Board, NIC, DRAM, drive and anything unrecognised. DDR5 is
+                // already throttling above 85, so the same number serves.
+                // Anything with a real limit -- and an NVMe almost always
+                // publishes one -- overrides this.
                 default: return 85000;
             }
         }
@@ -101,6 +133,35 @@ namespace Singularity {
         /** Degrees still available before limit_millidegrees. */
         public int margin_millidegrees {
             get { return limit_millidegrees - millidegrees; }
+        }
+
+        /**
+         * How hot this sensor is, 0.0 to 1.0, for drawing a bar.
+         *
+         * Spans AMBIENT to the limit rather than 0 C to the limit. Zero is not
+         * a meaningful floor for a temperature: a machine sitting in a room is
+         * already at 20-ish, so measuring from 0 puts every idle sensor near
+         * the middle of its bar and the bars stop distinguishing anything.
+         * Measured on O6N, from ambient: CPU_B0 at 49 C against a 100 C limit
+         * fills 0.36 while the NVMe at 67.8 C against 85 C fills 0.73, so the
+         * one sensor actually worth looking at is the one that reads full --
+         * from 0 C those would be 0.49 and 0.80, much closer together.
+         *
+         * Clamped at both ends: a sensor below ambient reads 0 rather than
+         * negative, and one past its limit reads 1 rather than overflowing.
+         */
+        public double heat_fraction {
+            get {
+                int span = limit_millidegrees - AMBIENT_MILLIDEGREES;
+                if (span <= 0) {
+                    return 0.0;
+                }
+                double f = (double) (millidegrees - AMBIENT_MILLIDEGREES)
+                         / (double) span;
+                if (f < 0.0) return 0.0;
+                if (f > 1.0) return 1.0;
+                return f;
+            }
         }
 
         /**
@@ -359,6 +420,29 @@ namespace Singularity {
         private const string[] NOT_DIE_LABELS = {
             "vrm", "vrout", "vddq", "ambient"
         };
+
+        /*
+         * The rest of what a SoC reports. Matched against chip AND label,
+         * because a Sky1 board names these in the label (scmi_sensors NPU,
+         * DDR_top, PCB_AMB) while a PC names them in the chip (nvme, r8169).
+         *
+         * Order matters in classify(): VPU is tested before GPU would be, or
+         * a "VPU" label never gets the chance -- and NPU before both, since a
+         * neural accelerator is neither.
+         */
+        private const string[] NPU_NEEDLES = { "npu", "aipu" };
+        private const string[] VPU_NEEDLES = { "vpu", "amvx", "venc", "vdec" };
+        private const string[] MEMORY_NEEDLES = { "ddr", "dram", "dimm", "lpddr" };
+        private const string[] STORAGE_NEEDLES = { "nvme", "drivetemp", "sd_", "ssd" };
+        private const string[] NETWORK_NEEDLES = {
+            "r8169", "r8125", "mt7921", "iwlwifi", "phy", "eth", "enp", "wlan"
+        };
+        /*
+         * Board-level points: the PCB thermistors, the SoC package zones and
+         * the generic ACPI zone. These are the machine, not a component, and
+         * grouping them apart keeps them from crowding out a hot drive.
+         */
+        private const string[] BOARD_NEEDLES = { "pcb", "soc_", "acpitz", "board" };
         private const string[] GPU_CHIPS = {
             "amdgpu", "radeon", "nouveau", "i915", "xe",
             "panfrost", "panthor", "mali", "lima", "v3d", "vc4",
@@ -538,6 +622,28 @@ namespace Singularity {
                 if (matches_any(label, CPU_LABELS)) {
                     return SensorKind.CPU;
                 }
+            }
+
+            // Everything else the SoC reports, matched on chip+label together.
+            // NPU first, then VPU: both would otherwise be swallowed by a
+            // broader match, and "vpu" must not be read as "gpu".
+            if (matches_any(joined, NPU_NEEDLES)) {
+                return SensorKind.NPU;
+            }
+            if (matches_any(joined, VPU_NEEDLES)) {
+                return SensorKind.VPU;
+            }
+            if (matches_any(joined, MEMORY_NEEDLES)) {
+                return SensorKind.MEMORY;
+            }
+            if (matches_any(joined, STORAGE_NEEDLES)) {
+                return SensorKind.STORAGE;
+            }
+            if (matches_any(joined, NETWORK_NEEDLES)) {
+                return SensorKind.NETWORK;
+            }
+            if (matches_any(joined, BOARD_NEEDLES)) {
+                return SensorKind.BOARD;
             }
             // Unknown is SYSTEM on purpose. See the class comment.
             return SensorKind.SYSTEM;
