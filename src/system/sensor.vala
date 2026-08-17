@@ -1165,6 +1165,38 @@ namespace Singularity {
             // reading identically for one tick will briefly show as one; that
             // is a cosmetic loss, where dropping a real sensor outright is
             // not.
+            // CARRY THE LIMIT ACROSS BEFORE DROPPING THE TWIN.
+            //
+            // The labelled twin is the better NAME, but not necessarily the
+            // better LIMIT. On this same Sky1 topology the unlabelled ACPI
+            // zone is frequently the only side carrying a real critical trip
+            // -- the identical case already noted further up this method,
+            // where hwmon acpitz publishes no tempN_crit at all while the
+            // matching thermal zone publishes 98 C. Shadowing TZB0 into
+            // CPU_B0 without moving that trip over left the survivor on a
+            // guessed fallback limit, so margin and severity were computed
+            // against the wrong ceiling -- silently, because the row still
+            // looked right. Adopt the reported limit first, then drop.
+            for (int i = 0; i < found.length; i++) {
+                if (!found[i].is_labelled || found[i].limit_is_reported) {
+                    continue;
+                }
+                foreach (SensorReading twin in found) {
+                    if (twin.is_labelled || !twin.limit_is_reported) {
+                        continue;
+                    }
+                    if (twin.kind == found[i].kind
+                        && twin.millidegrees == found[i].millidegrees) {
+                        found[i] = new SensorReading.with_limit(found[i].label,
+                                                                found[i].millidegrees,
+                                                                found[i].kind,
+                                                                twin.limit_millidegrees,
+                                                                true);
+                        break;
+                    }
+                }
+            }
+
             SensorReading[] deduped = {};
             foreach (SensorReading candidate in found) {
                 bool shadowed = false;

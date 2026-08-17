@@ -163,28 +163,71 @@ namespace Singularity {
                         });
                     }
                 } else if (device is NM.DeviceEthernet) {
-                    var ed = (NM.DeviceEthernet) device;
-                    ethernet_devices.add(ed);
-                    has_ethernet = true;
-                    if (ethernet_device == null) {
-                        ethernet_device = ed;
-                    }
-                    var port = new EthernetPortInfo(ed.get_iface(), ed.state == NM.DeviceState.ACTIVATED);
-                    ethernet_ports_list.add(port);
-                    probe_ethernet_port.begin(port);
-                    // Watch EVERY wired port. Only the first one used to be
-                    // watched, so on a machine with more than one NIC a link
-                    // coming up on any other port never triggered a refresh.
-                    ed.notify["state"].connect(() => {
-                        port.mark_connected(ed.state == NM.DeviceState.ACTIVATED);
-                        ethernet_ports_changed();
-                        update_state();
-                    });
+                    register_ethernet_device((NM.DeviceEthernet) device);
                 }
             }
             if (wifi_device == null) {
                 warning("No WiFi device found!");
             }
+
+            // A wired port can appear or disappear long after this initial
+            // enumeration -- a USB-C dock or a USB ethernet adapter is the
+            // common case, and this hardware is docked routinely. Without
+            // these, ethernet_ports() kept reporting a port that had been
+            // unplugged and never showed one that had just been attached,
+            // which directly contradicts what ethernet_ports_changed()
+            // promises its subscribers.
+            client.device_added.connect((device) => {
+                if (device is NM.DeviceEthernet) {
+                    register_ethernet_device((NM.DeviceEthernet) device);
+                    ethernet_ports_changed();
+                    update_state();
+                }
+            });
+            client.device_removed.connect((device) => {
+                if (!(device is NM.DeviceEthernet)) {
+                    return;
+                }
+                var gone = (NM.DeviceEthernet) device;
+                ethernet_devices.remove(gone);
+                string iface = gone.get_iface();
+                for (int i = ethernet_ports_list.length - 1; i >= 0; i--) {
+                    if (ethernet_ports_list.get(i).iface == iface) {
+                        ethernet_ports_list.remove_index(i);
+                    }
+                }
+                has_ethernet = ethernet_devices.length > 0;
+                // ethernet_device is the cached "currently interesting" port
+                // used by is_wired_connected. If the removed device was it,
+                // drop the dangling reference and let update_state() re-pick
+                // from whatever is left rather than reporting link state for
+                // a device that no longer exists.
+                if (ethernet_device == gone) {
+                    ethernet_device = ethernet_devices.length > 0
+                        ? ethernet_devices.get(0) : null;
+                }
+                ethernet_ports_changed();
+                update_state();
+            });
+        }
+
+        private void register_ethernet_device(NM.DeviceEthernet ed) {
+            ethernet_devices.add(ed);
+            has_ethernet = true;
+            if (ethernet_device == null) {
+                ethernet_device = ed;
+            }
+            var port = new EthernetPortInfo(ed.get_iface(), ed.state == NM.DeviceState.ACTIVATED);
+            ethernet_ports_list.add(port);
+            probe_ethernet_port.begin(port);
+            // Watch EVERY wired port. Only the first one used to be
+            // watched, so on a machine with more than one NIC a link
+            // coming up on any other port never triggered a refresh.
+            ed.notify["state"].connect(() => {
+                port.mark_connected(ed.state == NM.DeviceState.ACTIVATED);
+                ethernet_ports_changed();
+                update_state();
+            });
         }
 
         /** Every wired port the board has, cable in or out. */
