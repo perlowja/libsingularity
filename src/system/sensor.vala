@@ -1110,16 +1110,30 @@ namespace Singularity {
                 // first-match rule upgraded one of them and left the other
                 // three on the fallback, so the same sensor was drawn against
                 // two different limits.
+                //
+                // Among same-label limit-less candidates, the CLOSEST reading
+                // by temperature wins, not the first found. hwmon and thermal
+                // enumerate independently, so "first" is directory order, not
+                // correspondence -- with two acpitz readings at 40C/50C and
+                // one 40C zone, a first-match rule could upgrade the 50C entry
+                // and leave two 40C readings, hiding the hottest sensor.
                 int upgrade_index = -1;
+                int best_delta = int.MAX;
                 bool duplicate = false;
                 for (int i = 0; i < found.length; i++) {
                     if (!same_sensor(found[i].label, zone.label)) {
                         continue;
                     }
                     duplicate = true;
-                    if (!found[i].limit_is_reported && zone.limit_is_reported) {
+                    if (found[i].limit_is_reported) {
+                        continue;
+                    }
+                    int delta = found[i].millidegrees > zone.millidegrees
+                        ? found[i].millidegrees - zone.millidegrees
+                        : zone.millidegrees - found[i].millidegrees;
+                    if (delta < best_delta) {
+                        best_delta = delta;
                         upgrade_index = i;
-                        break;
                     }
                 }
                 if (upgrade_index >= 0) {
