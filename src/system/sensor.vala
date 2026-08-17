@@ -1177,11 +1177,26 @@ namespace Singularity {
             // guessed fallback limit, so margin and severity were computed
             // against the wrong ceiling -- silently, because the row still
             // looked right. Adopt the reported limit first, then drop.
+            // Each donor is consumed at most ONCE. Kind plus temperature is
+            // not an identity: Sky1 reports several same-kind sensors that
+            // can read identically for a tick (the CPU cluster zones sit
+            // within a degree of each other), and without a consumed flag a
+            // single zone's trip point would be handed to every labelled
+            // sensor that happened to match it that tick -- inventing a
+            // limit for sensors whose donor was really a different zone.
+            // One-to-one keeps an unmatched sensor honestly limit-less
+            // instead, which downstream already renders as a fallback rather
+            // than as a wrong ceiling.
+            bool[] limit_donor_used = new bool[found.length];
             for (int i = 0; i < found.length; i++) {
                 if (!found[i].is_labelled || found[i].limit_is_reported) {
                     continue;
                 }
-                foreach (SensorReading twin in found) {
+                for (int j = 0; j < found.length; j++) {
+                    if (limit_donor_used[j]) {
+                        continue;
+                    }
+                    SensorReading twin = found[j];
                     if (twin.is_labelled || !twin.limit_is_reported) {
                         continue;
                     }
@@ -1192,6 +1207,7 @@ namespace Singularity {
                                                                 found[i].kind,
                                                                 twin.limit_millidegrees,
                                                                 true);
+                        limit_donor_used[j] = true;
                         break;
                     }
                 }
