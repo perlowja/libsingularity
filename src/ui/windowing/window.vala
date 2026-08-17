@@ -29,11 +29,6 @@ namespace Singularity.Widgets {
             if (root != null && (
                 root.has_css_class("maximized")     ||
                 root.has_css_class("fullscreen")    ||
-                root.has_css_class("tiled")         ||
-                root.has_css_class("tiled-left")    ||
-                root.has_css_class("tiled-right")   ||
-                root.has_css_class("tiled-top")     ||
-                root.has_css_class("tiled-bottom")  ||
                 root.has_css_class("no-rounded-corners") ||
                 root.has_css_class("ssd-mode")
             )) {

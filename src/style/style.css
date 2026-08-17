@@ -45,13 +45,16 @@ window.csd.singularity-app {
 window.csd.singularity-app.no-rounded-corners,
 window.csd.singularity-app.maximized,
 window.csd.singularity-app.fullscreen,
+window.csd.singularity-app.ssd-mode {
+    border-radius: 0;
+}
+
 window.csd.singularity-app.tiled,
 window.csd.singularity-app.tiled-left,
 window.csd.singularity-app.tiled-right,
 window.csd.singularity-app.tiled-top,
-window.csd.singularity-app.tiled-bottom,
-window.csd.singularity-app.ssd-mode {
-    border-radius: 0;
+window.csd.singularity-app.tiled-bottom {
+    border-radius: 12px;
 }
 
 window.popup {
@@ -2245,10 +2248,16 @@ window.app-menu-window {
 .singularity-app.tiled-top .singularity-app-frame,
 .singularity-app.tiled-bottom .singularity-app-frame,
 .singularity-app.ssd-mode .singularity-app-frame {
-    border-radius: 0;
     border: none;
     margin: 0;
     box-shadow: none;
+}
+
+.singularity-app.no-rounded-corners .singularity-app-frame,
+.singularity-app.maximized .singularity-app-frame,
+.singularity-app.fullscreen .singularity-app-frame,
+.singularity-app.ssd-mode .singularity-app-frame {
+    border-radius: 0;
 }
 
 window.singularity .dock-window,
