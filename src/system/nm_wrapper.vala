@@ -24,7 +24,7 @@ namespace Singularity {
             this.connected = connected;
         }
 
-        internal void set_connected(bool value) {
+        internal void mark_connected(bool value) {
             connected = value;
         }
 
@@ -176,7 +176,7 @@ namespace Singularity {
                     // watched, so on a machine with more than one NIC a link
                     // coming up on any other port never triggered a refresh.
                     ed.notify["state"].connect(() => {
-                        port.set_connected(ed.state == NM.DeviceState.ACTIVATED);
+                        port.mark_connected(ed.state == NM.DeviceState.ACTIVATED);
                         ethernet_ports_changed();
                         update_state();
                     });
