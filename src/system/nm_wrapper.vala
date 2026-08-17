@@ -2,6 +2,38 @@ using NM;
 
 namespace Singularity {
 
+    /**
+     * One physical wired port, connected or not. NM only tells the UI about
+     * a port once it has a device object, so "not connected" and "not
+     * present" are the same picture to it -- this exists so the Network
+     * settings page can list every port a board actually has, cable in or
+     * out, rather than only the one currently carrying traffic.
+     */
+    public class EthernetPortInfo : GLib.Object {
+        public string iface { get; private set; }
+        public bool connected { get; private set; }
+
+        /** PCI chipset string (lspci), e.g. "RTL8125 2.5GbE Controller". Empty until probed. */
+        public string chipset { get; private set; default = ""; }
+
+        /** Highest advertised link mode (ethtool), e.g. "2.5 GbE". Empty until probed or unknown. */
+        public string capability { get; private set; default = ""; }
+
+        public EthernetPortInfo(string iface, bool connected) {
+            this.iface = iface;
+            this.connected = connected;
+        }
+
+        internal void set_connected(bool value) {
+            connected = value;
+        }
+
+        internal void set_details(string chipset, string capability) {
+            this.chipset = chipset;
+            this.capability = capability;
+        }
+    }
+
     public class NetworkManagerWrapper : GLib.Object {
         public bool wifi_enabled { get; private set; default = true; }
         public bool has_wifi { get; private set; default = false; }
@@ -25,6 +57,11 @@ namespace Singularity {
         public signal void hotspot_state_changed();
         public signal void sharing_action_result(bool success, string message);
 
+        // Fires when a port is added/removed, changes link state, or a
+        // chipset/capability probe completes -- whichever, the settings
+        // page's list needs a full rebuild rather than one row's update.
+        public signal void ethernet_ports_changed();
+
         private const string HOTSPOT_ID = "Singularity Hotspot";
         private const string WIRED_SHARE_ID = "Singularity Wired Sharing";
 
@@ -42,6 +79,7 @@ namespace Singularity {
         private GenericArray<NM.DeviceWifi> wifi_devices = new GenericArray<NM.DeviceWifi>();
         private NM.DeviceEthernet? ethernet_device;
         private GenericArray<NM.DeviceEthernet> ethernet_devices = new GenericArray<NM.DeviceEthernet>();
+        private GenericArray<EthernetPortInfo> ethernet_ports_list = new GenericArray<EthernetPortInfo>();
         private bool wifi_request_in_flight = false;
         private bool wifi_requested_state = false;
 
@@ -131,16 +169,116 @@ namespace Singularity {
                     if (ethernet_device == null) {
                         ethernet_device = ed;
                     }
+                    var port = new EthernetPortInfo(ed.get_iface(), ed.state == NM.DeviceState.ACTIVATED);
+                    ethernet_ports_list.add(port);
+                    probe_ethernet_port.begin(port);
                     // Watch EVERY wired port. Only the first one used to be
                     // watched, so on a machine with more than one NIC a link
                     // coming up on any other port never triggered a refresh.
                     ed.notify["state"].connect(() => {
+                        port.set_connected(ed.state == NM.DeviceState.ACTIVATED);
+                        ethernet_ports_changed();
                         update_state();
                     });
                 }
             }
             if (wifi_device == null) {
                 warning("No WiFi device found!");
+            }
+        }
+
+        /** Every wired port the board has, cable in or out. */
+        public GenericArray<EthernetPortInfo> ethernet_ports() {
+            return ethernet_ports_list;
+        }
+
+        /**
+         * Chipset (lspci) and top advertised link mode (ethtool) for one
+         * port. Both are external processes, so this runs once per port at
+         * discovery time and caches the result on the EthernetPortInfo --
+         * neither changes while the machine is running, so there is nothing
+         * to re-probe on a later link-state change.
+         */
+        private async void probe_ethernet_port(EthernetPortInfo port) {
+            string chipset = yield probe_chipset(port.iface);
+            string capability = yield probe_capability(port.iface);
+            port.set_details(chipset, capability);
+            ethernet_ports_changed();
+        }
+
+        private async string probe_chipset(string iface) {
+            string pci_addr;
+            try {
+                string link = GLib.FileUtils.read_link("/sys/class/net/%s/device".printf(iface));
+                pci_addr = GLib.Path.get_basename(link);
+            } catch (GLib.FileError e) {
+                return "";
+            }
+            string[] argv = { "lspci", "-s", pci_addr, "-vmm" };
+            string? output = yield run_probe(argv);
+            if (output == null) {
+                return "";
+            }
+            // lspci -vmm is "Key:\tValue" lines, one record per device. The
+            // marketing chipset name is the Device field, not Vendor -- e.g.
+            // "RTL8125 2.5GbE Controller", not "Realtek Semiconductor Co., Ltd.".
+            foreach (string line in output.split("\n")) {
+                if (line.has_prefix("Device:")) {
+                    return line.substring("Device:".length).strip();
+                }
+            }
+            return "";
+        }
+
+        private async string probe_capability(string iface) {
+            string[] argv = { "ethtool", iface };
+            string? output = yield run_probe(argv);
+            if (output == null) {
+                return "";
+            }
+            // "Supported link modes:" is followed by one or more continuation
+            // lines (further indented, no leading key) until the next
+            // "Key:" line. Collect the whole block, then take the highest
+            // NbaseT rate mentioned -- that is the port's ceiling regardless
+            // of what it is currently negotiated to.
+            bool in_block = false;
+            int best_mbps = -1;
+            foreach (string raw_line in output.split("\n")) {
+                string line = raw_line.strip();
+                if (line.has_prefix("Supported link modes:")) {
+                    in_block = true;
+                    line = line.substring("Supported link modes:".length).strip();
+                } else if (in_block && raw_line.length > 0 && !raw_line.get_char(0).isspace()) {
+                    break;
+                } else if (!in_block) {
+                    continue;
+                }
+                foreach (string token in line.split(" ")) {
+                    int idx = token.index_of("baseT");
+                    if (idx <= 0) continue;
+                    int mbps = int.parse(token.substring(0, idx));
+                    if (mbps > best_mbps) best_mbps = mbps;
+                }
+            }
+            if (best_mbps <= 0) {
+                return "";
+            }
+            return best_mbps >= 1000
+                ? "%.3g GbE".printf(best_mbps / 1000.0)
+                : "%d Mbps".printf(best_mbps);
+        }
+
+        /** Run a short-lived probe utility off-thread; null on any failure. */
+        private async string? run_probe(string[] argv) {
+            try {
+                var proc = new GLib.Subprocess.newv(argv,
+                    GLib.SubprocessFlags.STDOUT_PIPE | GLib.SubprocessFlags.STDERR_SILENCE);
+                string? stdout_text = null;
+                string? stderr_text = null;
+                yield proc.communicate_utf8_async(null, null, out stdout_text, out stderr_text);
+                return stdout_text;
+            } catch (GLib.Error e) {
+                return null;
             }
         }
 
