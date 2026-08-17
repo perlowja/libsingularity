@@ -18,13 +18,13 @@ namespace Singularity {
     public enum SensorKind {
         CPU,
         GPU,
+        SYSTEM,
         NPU,
         VPU,
         MEMORY,
         STORAGE,
         NETWORK,
-        BOARD,
-        SYSTEM
+        BOARD
     }
 
     /**
@@ -173,13 +173,25 @@ namespace Singularity {
             }
         }
 
+        public SensorReading(string label, int millidegrees, SensorKind kind) {
+            this.with_limit(label, millidegrees, kind, 0, false);
+        }
+
         /**
-         * The limit argument is optional so that every existing caller --
-         * including the NVIDIA path, which has no sysfs node to read a limit
-         * from -- keeps compiling and falls back by kind.
+         * Extended form carrying a reported thermal limit and/or provenance.
+         *
+         * A NAMED constructor rather than default arguments on the primary
+         * one: Vala default arguments are source-level sugar only -- the
+         * generated C constructor takes every listed parameter with no
+         * overload, so a client compiled against the old 3-argument
+         * SensorReading(label, millidegrees, kind) would still link against
+         * a 5-argument symbol and silently pass garbage for the two new
+         * parameters instead of failing to build. Keeping the primary
+         * constructor's signature frozen and adding this as a second,
+         * separately-named entry point avoids that trap entirely.
          */
-        public SensorReading(string label, int millidegrees, SensorKind kind,
-                             int limit_millidegrees = 0, bool is_labelled = false) {
+        public SensorReading.with_limit(string label, int millidegrees, SensorKind kind,
+                             int limit_millidegrees, bool is_labelled) {
             this.is_labelled = is_labelled;
             this.label = label;
             this.millidegrees = millidegrees;
@@ -695,7 +707,7 @@ namespace Singularity {
                     string name = (label != null && label != "")
                         ? "%s %s".printf(chip, label)
                         : chip;
-                    found += new SensorReading(name, millidegrees,
+                    found += new SensorReading.with_limit(name, millidegrees,
                                                classify(chip, label),
                                                hwmon_limit(base_path, stem),
                                                label != null && label != "");
@@ -727,9 +739,9 @@ namespace Singularity {
                 if (!plausible(millidegrees)) {
                     continue;
                 }
-                found += new SensorReading(zone_type, millidegrees,
+                found += new SensorReading.with_limit(zone_type, millidegrees,
                                            classify(zone_type, null),
-                                           thermal_limit(base_path));
+                                           thermal_limit(base_path), false);
             }
             return found;
         }
@@ -995,7 +1007,7 @@ namespace Singularity {
                 if (!plausible(celsius * 1000)) {
                     continue;
                 }
-                found += new SensorReading(name, celsius * 1000, SensorKind.GPU,
+                found += new SensorReading.with_limit(name, celsius * 1000, SensorKind.GPU,
                                            0, true);
                 if (fields.length >= 4) {
                     // Fields can read "[N/A]" -- an integrated Thor GPU reports
