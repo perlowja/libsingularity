@@ -276,7 +276,13 @@ if get_option('system')
       'src/system/utilization.vala',
       'src/system/sensor.vala',
     ),
-    dependencies: [gio_dep, gee_dep],
+    # giounix_dep: utilization.vala's is_real_filesystem() consults
+    # GLib.UnixMountEntry (gio-unix-2.0) when proc_root is unset. The
+    # fixture tests always set proc_root, so this path never actually runs
+    # under test -- but the file still needs to LINK, and every valac
+    # invocation compiles the whole file regardless of which branch a test
+    # exercises.
+    dependencies: [gio_dep, giounix_dep, gee_dep],
   )
   test('utilization', utilization_test)
 endif
