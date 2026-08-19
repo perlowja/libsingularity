@@ -528,6 +528,42 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
     color: #1a1a1a;
 }
 
+/* Sensors indicator: FIXED opaque pill, immune to the wallpaper-adaptive
+   rules above.
+   The color rules above pick white-vs-dark TEXT for the whole panel by
+   sampling wallpaper brightness under it, which works when the panel floats
+   directly over a mostly-uniform region. A busy/high-detail wallpaper has no
+   single "brightness" -- the same label sits over light and dark pixels at
+   once, and unlike every other panel control (clock/activities/notification
+   all paint their own pill, see .clock-button/.notification-button below)
+   the sensors indicator was built with an explicit "flat" button and no
+   background of its own, so it was reading raw wallpaper through translucent
+   text with nothing behind it. MEASURED on O6N 2026-08-19: "CPU 1% MEM 4%"
+   was present in the compositor but not legible against the desktop image.
+   Solid @surface_bg (not the alpha-blended idiom .clock-button uses) is
+   deliberate: a translucent pill still washes out over high-contrast
+   wallpaper detail, which is the exact failure being fixed.
+   Each selector below extends the exact rule it must out-specificity --
+   panel-window+panel+sensors-indicator strictly beats panel-window+panel,
+   and likewise for the flat-panel and light-bg variants -- so this wins in
+   every panel state without needing !important. */
+.panel-window .panel .sensors-indicator,
+.panel-window .panel .sensors-indicator *,
+.panel-window.flat-panel .panel .sensors-indicator,
+.panel-window.flat-panel .panel .sensors-indicator *,
+.panel-window.light-bg:not(.flat-panel) .panel .sensors-indicator,
+.panel-window.light-bg:not(.flat-panel) .panel .sensors-indicator * {
+    color: @text_color;
+}
+
+.panel-window .panel .sensors-indicator {
+    background-color: @surface_bg;
+    border-radius: 999px;
+    padding: 2px 10px;
+    margin: 2px;
+    min-height: 28px;
+}
+
 /* ...but NOT inside popovers/menus opened from the panel: those are
    descendants of the panel button in the GTK4 widget tree, so the panel
    color rules above bleed onto their own (theme-coloured) body. Reset them
