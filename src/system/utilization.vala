@@ -411,10 +411,16 @@ namespace Singularity {
         /**
          * Space used per mounted filesystem.
          *
-         * Pseudo filesystems are filtered by TYPE rather than by mount point:
-         * the set of paths the kernel mounts tmpfs on is not stable across
-         * distributions, but the type name is. Devices are de-duplicated so a
-         * bind mount does not report the same storage twice.
+         * Pseudo filesystems are filtered via GUnixMountEntry when reading
+         * the real /proc/mounts (the static rule list inside glib is
+         * broader than the hand-maintained one this used to carry), and via
+         * a small fstype table when reading a fixture tree under proc_root
+         * -- glib reads the real /proc and would ignore the fixture. See
+         * is_real_filesystem for the device-path overrides that keep a
+         * mounted root disk visible and the iso9660 / udf / erofs / loop
+         * rules that keep alarm-coloured disk images out. Devices are
+         * de-duplicated so a bind mount does not report the same storage
+         * twice.
          */
         private void read_filesystems() {
             var f = FileStream.open(proc_path("mounts"), "r");
@@ -435,7 +441,7 @@ namespace Singularity {
                 string mount_point = parts[1].compress();  // \040 -> space
                 string fstype = parts[2];
 
-                if (!is_real_filesystem(fstype, device)) {
+                if (!is_real_filesystem(fstype, device, mount_point)) {
                     continue;
                 }
                 if (!seen_devices.add(device)) {
@@ -465,7 +471,74 @@ namespace Singularity {
             _filesystems = readings;
         }
 
-        private bool is_real_filesystem(string fstype, string device) {
+        private bool is_real_filesystem(string fstype, string device, string mount_point) {
+            // Mounted disk images are always 100% full -- an image is written
+            // full and never grows -- so a row that can only ever say "100%"
+            // is alarm-coloured noise. GUnixMountEntry cannot know this is a
+            // product decision about what to display, so the check stays.
+            if (fstype == "iso9660" || fstype == "udf" || fstype == "erofs") {
+                return false;
+            }
+
+            // A loop mount is a FILE inside some other filesystem, and that
+            // filesystem is already listed. Counting it again reports the same
+            // bytes twice. Same reasoning as above -- a presentation rule that
+            // GUnixMountEntry cannot recover from its mount-table data.
+            if (device.has_prefix("/dev/loop")) {
+                return false;
+            }
+
+            // A real filesystem is backed by something in /dev (block device)
+            // or named like a network share (host:/path, user@host:/path).
+            // GUnixMountEntry.is_system_internal() also flags "/" itself as
+            // internal (its hard-coded system_mount_paths list contains "/",
+            // reasoning that file managers already have a "Filesystem root"
+            // entry and do not also need it as a mount). For a capacity
+            // panel this is wrong -- the root disk is the one the user most
+            // wants to see -- so when the device shape has already said
+            // "looks like a real disk" we trust that and skip glib.
+            if (device.has_prefix("/dev/") || device.contains(":")) {
+                return true;
+            }
+
+            // Pseudo-filesystem detection, consulted only when the device
+            // shape has not already said "looks like a real disk".
+            // GUnixMountEntry is wider than the old hand-maintained list
+            // (it covers /dev/loop, devpts, ...), but its rules are
+            // incomplete for fuse.* / snapfuse (not flagged as internal) and
+            // it has no way to know about the iso9660 / udf / erofs product
+            // rule above.
+            //
+            // Two code paths exist because GUnixMountEntry reads the REAL
+            // /proc/mounts and has no override hook: when proc_root is set
+            // (fixture tests, see tests/utilization_test.vala) glib would
+            // query the host and ignore the synthetic mounts we wrote, so
+            // we fall back to the hand-maintained fstype list. When
+            // proc_root is empty we are reading the real /proc/mounts, so
+            // we can ask glib directly.
+            if (proc_root == "") {
+                // Vala 0.56 binds g_unix_mount_for() as a constructor named
+                // "@for"; the second argument is the table-read timestamp
+                // out-param that the C prototype requires.
+                uint64 time_read;
+                var entry = new GLib.UnixMountEntry.@for(mount_point, out time_read);
+                if (entry != null && entry.is_system_internal()) {
+                    return false;
+                }
+            } else if (fstype_is_pseudo(fstype)) {
+                return false;
+            }
+
+            return false;
+        }
+
+        /**
+         * Hand-maintained fstype list, used only when reading a fixture
+         * /proc/mounts (see the dual-path comment in is_real_filesystem).
+         * Mirrors what GUnixMountEntry.is_system_internal() would answer on a
+         * real system, so the fixture tests assert against the same shapes.
+         */
+        private static bool fstype_is_pseudo(string fstype) {
             switch (fstype) {
                 case "proc": case "sysfs": case "devtmpfs": case "devpts":
                 case "tmpfs": case "ramfs": case "cgroup": case "cgroup2":
@@ -473,25 +546,9 @@ namespace Singularity {
                 case "debugfs": case "tracefs": case "configfs": case "fusectl":
                 case "mqueue": case "hugetlbfs": case "binfmt_misc": case "autofs":
                 case "rpc_pipefs": case "nsfs": case "squashfs": case "overlay":
-                    return false;
-                // Read-only image filesystems. Always exactly 100% full,
-                // because an image is written full and never grows -- a row
-                // that can only ever say "100%" is alarm-coloured noise.
-                case "iso9660": case "udf": case "erofs":
-                    return false;
+                    return true;
             }
-
-            // A loop mount is a FILE inside some other filesystem, and that
-            // filesystem is already listed. Counting it again reports the same
-            // bytes twice. Measured on cixmini 2026-08-19, which had four
-            // ISOs loop-mounted under /mnt and each showed as a full disk.
-            if (device.has_prefix("/dev/loop")) {
-                return false;
-            }
-
-            // A real filesystem is backed by something in /dev or by a network
-            // share. Anything else mounting under a bare name is synthetic.
-            return device.has_prefix("/dev/") || device.contains(":");
+            return false;
         }
     }
 }
