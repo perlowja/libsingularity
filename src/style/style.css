@@ -546,7 +546,16 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
    Each selector below extends the exact rule it must out-specificity --
    panel-window+panel+sensors-indicator strictly beats panel-window+panel,
    and likewise for the flat-panel and light-bg variants -- so this wins in
-   every panel state without needing !important. */
+   every panel state without needing !important.
+
+   font-family is reset here too, for the same "override the ancestor,
+   don't just fail to set anything" reason: .singularity (applied to the
+   whole panel window, see below) hardcodes 'Inter', and font-family
+   inherits, so a descendant that sets nothing would still render in Inter
+   rather than the platform's configured UI font. Every OTHER undecorated
+   panel control already gets the system font for free because nothing in
+   this file happens to override it for them; sans-serif here restores that
+   same default instead of inventing a new one. */
 .panel-window .panel .sensors-indicator,
 .panel-window .panel .sensors-indicator *,
 .panel-window.flat-panel .panel .sensors-indicator,
@@ -554,6 +563,7 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
 .panel-window.light-bg:not(.flat-panel) .panel .sensors-indicator,
 .panel-window.light-bg:not(.flat-panel) .panel .sensors-indicator * {
     color: @text_color;
+    font-family: sans-serif;
 }
 
 .panel-window .panel .sensors-indicator {
