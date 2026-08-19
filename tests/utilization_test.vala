@@ -58,9 +58,33 @@ private void setup() {
     write_proc("mounts", "");
 }
 
+/**
+ * Remove the fixture tree.
+ *
+ * Implemented on GLib rather than by shelling out through the POSIX binding,
+ * so this target needs no vala package beyond gio and gee. A --pkg the meson
+ * target does not declare compiles fine by hand and then breaks `meson test`.
+ */
+private void remove_recursive(string path) {
+    try {
+        Dir dir = Dir.open(path);
+        string? name;
+        while ((name = dir.read_name()) != null) {
+            string child = Path.build_filename(path, name);
+            if (FileUtils.test(child, FileTest.IS_DIR)) {
+                remove_recursive(child);
+            } else {
+                FileUtils.unlink(child);
+            }
+        }
+    } catch (FileError e) {
+        return;   // already gone, or never created
+    }
+    DirUtils.remove(path);
+}
+
 private void teardown() {
-    // Best effort; the tmp dir is small and the harness is short-lived.
-    Posix.system("rm -rf '%s'".printf(fixture_root));
+    remove_recursive(fixture_root);
 }
 
 /* ---- CPU ------------------------------------------------------------- */
