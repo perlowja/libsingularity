@@ -17,6 +17,7 @@ typelibdir = join_paths(libdir, 'girepository-1.0')
 
 gtk4_dep       = dependency('gtk4',               version: '>= 4.6')
 layershell_dep = dependency('gtk4-layer-shell-0', version: '>= 0.7')
+wayland_dep    = dependency('wayland-client')
 gee_dep        = dependency('gee-0.8',            version: '>= 0.20')
 json_dep       = dependency('json-glib-1.0',      version: '>= 1.6')
 peas_dep       = dependency('libpeas-2',          version: '>= 2.0')
@@ -28,7 +29,22 @@ introspection_dep = dependency('gobject-introspection-1.0', required: get_option
 cc = meson.get_compiler('c')
 m_dep = cc.find_library('m', required: false)
 
-libsingularity_deps = [gtk4_dep, layershell_dep, gee_dep, json_dep, peas_dep, gmodule_dep, soup_dep, gtksource_dep, m_dep]
+libsingularity_deps = [gtk4_dep, layershell_dep, wayland_dep, gee_dep, json_dep, peas_dep, gmodule_dep, soup_dep, gtksource_dep, m_dep]
+
+wayland_scanner = find_program('wayland-scanner')
+effect_protocol_xml = 'protocols/singularity-blur-unstable-v1.xml'
+effect_protocol_c = custom_target(
+  'singularity-blur-unstable-v1-client-protocol.c',
+  input: effect_protocol_xml,
+  output: 'singularity-blur-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+effect_protocol_h = custom_target(
+  'singularity-blur-unstable-v1-client-protocol.h',
+  input: effect_protocol_xml,
+  output: 'singularity-blur-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
 
 libsingularity_resources = gnome.compile_resources(
   'libsingularity-resources',
@@ -109,6 +125,7 @@ libsingularity_sources = files(
   'src/animation/timed_animation.vala',
   'src/style/style_manager.vala',
   'src/style/theme_mode.vala',
+  'src/style/background_effect.vala',
   'src/accessibility/accessibility_manager.vala',
   'src/ui/visual/chart_widgets.vala',
   'src/ui/visual/circular_progress.vala',
@@ -125,8 +142,13 @@ libsingularity_sources = files(
 )
 
 libsingularity = shared_library('singularity',
-  libsingularity_sources + libsingularity_resources,
+  libsingularity_sources + libsingularity_resources + [
+    'src/wayland/surface_effect.c',
+    effect_protocol_c,
+    effect_protocol_h,
+  ],
   dependencies: libsingularity_deps,
+  include_directories: include_directories('src'),
   vala_header: 'singularity.h',
   vala_vapi: 'singularity-1.0.vapi',
   vala_gir: 'Singularity-1.0.gir',

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="singularity_blur_unstable_v1">
+  <copyright>
+    Copyright 2026 Singularity Desktop
+  </copyright>
+
+  <interface name="zsingularity_blur_manager_v1" version="3">
+    <description summary="background material manager">
+      Lets a client request a compositor-rendered material behind one of its
+      surfaces. The compositor uses the surface alpha as the material mask.
+    </description>
+
+    <request name="destroy" type="destructor"/>
+
+    <enum name="error">
+      <entry name="invalid_surface" value="0"
+             summary="the wl_surface argument is invalid"/>
+      <entry name="effect_exists" value="1"
+             summary="the surface already has an effect object"/>
+    </enum>
+
+    <request name="get_blur">
+      <arg name="id" type="new_id" interface="zsingularity_blur_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="zsingularity_blur_v1" version="3">
+    <description summary="background material for a surface">
+      Parameters are double-buffered and become active on commit.
+    </description>
+
+    <enum name="mode">
+      <entry name="disabled" value="0" summary="no background material"/>
+      <entry name="glass" value="1" summary="refractive glass material"/>
+      <entry name="blur" value="2" summary="classic background blur"/>
+    </enum>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="set_radius">
+      <arg name="radius" type="uint" summary="legacy blur radius"/>
+    </request>
+
+    <request name="set_noise">
+      <arg name="noise" type="uint" summary="legacy noise percentage"/>
+    </request>
+
+    <request name="commit"/>
+
+    <request name="set_mode" since="2">
+      <arg name="mode" type="uint" enum="mode"/>
+    </request>
+
+    <request name="set_region" since="2">
+      <description summary="limit the material to a surface-local region">
+        A null region selects the complete surface. Pixels with zero or full
+        alpha remain unchanged even when they fall inside the region.
+      </description>
+      <arg name="region" type="object" interface="wl_region" allow-null="true"/>
+    </request>
+
+    <request name="set_strength" since="3">
+      <description summary="set material blur strength">
+        Values are percentages clamped to 0-100 by the compositor.
+      </description>
+      <arg name="strength" type="uint" summary="blur strength percentage"/>
+    </request>
+  </interface>
+</protocol>

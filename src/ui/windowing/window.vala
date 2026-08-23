@@ -119,6 +119,8 @@ namespace Singularity.Widgets {
         private ScrolledWindow sidebar_scroll_wrap;
         private int _sidebar_width = 180;
         private GLib.Settings? desktop_settings;
+        private ulong _background_effect_handler = 0;
+        private ulong _blur_strength_handler = 0;
         private bool _flat = false;
         private bool _show_close = true;
         private bool _force_ssd = false;
@@ -181,6 +183,20 @@ namespace Singularity.Widgets {
             // so the compositor sees the card as the real window.
             set_child(app_frame);
             _app_frame = app_frame;
+
+            _apply_background_effect();
+            if (desktop_settings != null
+                    && desktop_settings.settings_schema.has_key("background-effect")) {
+                _background_effect_handler = desktop_settings.changed["background-effect"].connect(
+                    _apply_background_effect
+                );
+                if (desktop_settings.settings_schema.has_key("blur-strength")) {
+                    _blur_strength_handler = desktop_settings.changed["blur-strength"].connect(
+                        _apply_background_effect
+                    );
+                }
+            }
+            this.map.connect(_apply_background_effect);
 
             var overlay = new Overlay();
             overlay.hexpand = true;
@@ -287,6 +303,14 @@ namespace Singularity.Widgets {
         // -- Window state persistence -----------------------------------
 
         public override void dispose() {
+            if (_background_effect_handler != 0 && desktop_settings != null) {
+                desktop_settings.disconnect(_background_effect_handler);
+                _background_effect_handler = 0;
+            }
+            if (_blur_strength_handler != 0 && desktop_settings != null) {
+                desktop_settings.disconnect(_blur_strength_handler);
+                _blur_strength_handler = 0;
+            }
             if (_rounded_corners_handler != 0 && desktop_settings != null) {
                 desktop_settings.disconnect(_rounded_corners_handler);
                 _rounded_corners_handler = 0;
@@ -320,6 +344,27 @@ namespace Singularity.Widgets {
             } else {
                 add_css_class("no-rounded-corners");
             }
+        }
+
+        private void _apply_background_effect() {
+            var mode = Singularity.Style.BackgroundEffect.read(desktop_settings);
+            if (!get_mapped() || mode == Singularity.Style.BackgroundEffectMode.DISABLED
+                    || _app_frame == null) {
+                Singularity.Style.BackgroundEffect.apply(this, mode);
+                return;
+            }
+
+            Graphene.Rect bounds;
+            if (_app_frame.compute_bounds(this, out bounds)) {
+                Singularity.Style.BackgroundEffect.apply(this, mode,
+                    (int) bounds.origin.x, (int) bounds.origin.y,
+                    (int) bounds.size.width, (int) bounds.size.height);
+            }
+        }
+
+        public override void size_allocate(int width, int height, int baseline) {
+            base.size_allocate(width, height, baseline);
+            _apply_background_effect();
         }
 
         private void restore_window_state() {

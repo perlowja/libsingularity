@@ -557,6 +557,18 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
     transition: background-color 180ms ease;
 }
 
+window.singularity-blur .panel,
+.singularity-blur .panel {
+    background-color: alpha(@panel_bg, 0.24);
+}
+
+window.singularity-glass .panel,
+.singularity-glass .panel {
+    background-color: alpha(@panel_bg, 0.12);
+    border-bottom: 1px solid alpha(@text_color, 0.14);
+    box-shadow: 0 1px 0 alpha(white, 0.16) inset;
+}
+
 .panel.no-transition {
     transition: none;
 }
@@ -863,16 +875,21 @@ window.layout-edit-overlay {
     background-image: linear-gradient(to bottom, transparent, @surface_overlay);
 }
 
-/*
- * When the compositor provides hardware background blur (SINGULARITY_BLUR_ENABLED),
- * the dock background becomes translucent so the blur shows through.
- * Without hardware blur, the opaque backdrop-filter: blur() CSS fallback is used.
- */
 window.singularity-blur .dock-box,
 .singularity-blur .dock-box,
 window.singularity-blur .dock-window:backdrop .dock-box,
 .singularity-blur .dock-window:backdrop .dock-box {
-    background-color: @surface_overlay;
+    background-color: alpha(@surface_overlay, 0.22);
+}
+
+window.singularity-glass .dock-box,
+.singularity-glass .dock-box,
+window.singularity-glass .dock-window:backdrop .dock-box,
+.singularity-glass .dock-window:backdrop .dock-box {
+    background-color: alpha(@surface_overlay, 0.12);
+    border-color: alpha(@text_color, 0.18);
+    box-shadow: 0 1px 0 alpha(white, 0.20) inset,
+                0 5px 18px alpha(@shadow_color, 0.38);
 }
 
 .dock-box {
@@ -1899,6 +1916,15 @@ popover.dock-window-previews > contents {
     min-width: 340px;
     min-height: 280px;
 }
+.singularity-blur .folder-overlay-card {
+    background-color: alpha(@window_tint, 0.26);
+}
+.singularity-glass .folder-overlay-card {
+    background-color: alpha(@window_tint, 0.15);
+    border: 1px solid alpha(@text_color, 0.18);
+    box-shadow: 0 1px 0 alpha(white, 0.18) inset,
+                0 8px 40px alpha(@shadow_color, 0.46);
+}
 .folder-name-entry {
     background: transparent;
     border: none;
@@ -1982,6 +2008,19 @@ popover.dock-window-previews > contents {
     box-shadow:
         0 1px 2px alpha(black, 0.22),
         0 6px 14px alpha(black, 0.34);
+}
+
+.singularity-blur .sidebar {
+    background-color: alpha(@window_tint, 0.26);
+}
+
+.singularity-glass .sidebar {
+    background-color: alpha(@window_tint, 0.15);
+    border-color: alpha(@text_color, 0.18);
+    box-shadow:
+        0 1px 0 alpha(white, 0.18) inset,
+        0 1px 2px alpha(black, 0.18),
+        0 6px 14px alpha(black, 0.30);
 }
 
 .warning-box {
@@ -2222,6 +2261,16 @@ window.app-menu-window {
     border: 1px solid @border_color;
     border-radius: 12px;
     transition: border-radius 0.15s ease;
+}
+
+.singularity-blur .singularity-app-frame {
+    background-color: alpha(@window_bg, 0.88);
+}
+
+.singularity-glass .singularity-app-frame {
+    background-color: alpha(@window_bg, 0.88);
+    border-color: alpha(@text_color, 0.20);
+    box-shadow: 0 1px 0 alpha(white, 0.18) inset;
 }
 
 /* Remove shadow on tiled/maximised/SSD states */

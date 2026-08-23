@@ -103,6 +103,52 @@ namespace Singularity.Style {
         public void load_theme() {
             if (accent_provider != null) return;
             apply_accent_color("blue");
+            setup_material_style();
+        }
+
+        private void setup_material_style() {
+            material_settings = Singularity.Core.safe_settings(
+                Singularity.Runtime.desktop_settings_schema);
+            if (material_settings != null
+                    && material_settings.settings_schema.has_key("window-transparency")) {
+                material_settings.changed["window-transparency"].connect(
+                    update_material_style);
+            }
+            update_material_style();
+        }
+
+        private void update_material_style() {
+            int transparency = 12;
+            if (material_settings != null
+                    && material_settings.settings_schema.has_key("window-transparency")) {
+                transparency = material_settings.get_int("window-transparency").clamp(0, 90);
+            }
+            int opacity = 100 - transparency;
+            string base_bg = current_dark_mode ? "#242424" : "#f6f5f4";
+            uint8 red, green, blue;
+            _parse_hex(base_bg, out red, out green, out blue);
+            string background = "rgba(%u, %u, %u, %d.%02d)".printf(
+                red, green, blue, opacity / 100, opacity % 100);
+            string css = """
+                .singularity-blur .singularity-app-frame,
+                .singularity-glass .singularity-app-frame {
+                    background-color: %s;
+                }
+            """.printf(background);
+
+            if (material_provider == null) {
+                material_provider = new CssProvider();
+                var display = Gdk.Display.get_default();
+                if (display != null) {
+                    StyleContext.add_provider_for_display(display, material_provider,
+                        Gtk.STYLE_PROVIDER_PRIORITY_USER + 1);
+                }
+            }
+            try {
+                material_provider.load_from_string(css);
+            } catch (Error e) {
+                warning("StyleManager: failed to apply material style: %s", e.message);
+            }
         }
 
         /**
@@ -164,6 +210,8 @@ namespace Singularity.Style {
             // Dock background: base + 4% accent tint (opaque + blur variant)
             string dock_bg      = _mix_rgba(dock_base, hex_color, 0.04, dock_alpha);
             string dock_bg_blur = _mix_rgba(dock_blur, hex_color, 0.04, dock_blur_alpha);
+            string dock_bg_glass = _mix_rgba(dock_blur, hex_color, 0.06,
+                dark ? 0.30 : 0.38);
             // Compute alpha variants (pure alpha of the accent color).
             uint8 ar, ag, ab;
             _parse_hex(hex_color, out ar, out ag, out ab);
@@ -243,6 +291,10 @@ namespace Singularity.Style {
                 .singularity-blur .dock-box,
                 window.singularity-blur .dock-window:backdrop .dock-box,
                 .singularity-blur .dock-window:backdrop .dock-box { background-color: %s; }
+                window.singularity-glass .dock-box,
+                .singularity-glass .dock-box,
+                window.singularity-glass .dock-window:backdrop .dock-box,
+                .singularity-glass .dock-window:backdrop .dock-box { background-color: %s; }
 
                 /* Workspace previews - rgbacomputed here for box-shadow */
                 .workspace-preview.active .workspace-clipper {
@@ -257,7 +309,7 @@ namespace Singularity.Style {
             """).printf(
                 hex_color,
                 tint8, toolbar_hex,
-                dock_bg, dock_bg_blur,
+                dock_bg, dock_bg_blur, dock_bg_glass,
                 alpha40, alpha20,
                 hex_color, hex_color, alpha40
             );
@@ -536,6 +588,8 @@ namespace Singularity.Style {
         }
 
         private CssProvider? accent_provider;
+        private CssProvider? material_provider;
+        private GLib.Settings? material_settings;
         private CssProvider? user_theme_provider;
         private CssProvider? user_theme_variant_provider;
         private string current_user_theme = "";
@@ -557,6 +611,7 @@ namespace Singularity.Style {
         public void apply_color_scheme(bool dark) {
             current_dark_mode = dark;
             apply_accent_color(current_accent, current_accent_wallpaper);
+            update_material_style();
             _load_user_theme_variant(dark);
         }
 
