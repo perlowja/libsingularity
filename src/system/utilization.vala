@@ -112,7 +112,8 @@ namespace Singularity {
         private uint _timer_id = 0;
 
         private CpuSample? _prev_cpu_total = null;
-        private CpuSample[] _prev_cpu_each = {};
+        private Gee.HashMap<string, CpuSample> _prev_cpu_each =
+            new Gee.HashMap<string, CpuSample>();
         private int64 _prev_disk_time_us = 0;
         private Gee.HashMap<string, DiskSample> _prev_disks =
             new Gee.HashMap<string, DiskSample>();
@@ -152,7 +153,7 @@ namespace Singularity {
             // a delta measured across the gap. A panel that was closed for an
             // hour would otherwise report one interval of nonsense on reopen.
             _prev_cpu_total = null;
-            _prev_cpu_each = {};
+            _prev_cpu_each.clear();
             _prev_disks.clear();
             _prev_disk_time_us = 0;
             _cpu_fraction = -1.0;
@@ -224,15 +225,22 @@ namespace Singularity {
                 _prev_cpu_total = total;
             }
 
+            // Matched by cpuN label, not array position, the same as disks
+            // below -- CPU hotplug (offlining a lower-numbered core, common
+            // on big.LITTLE/power-gated ARM parts) shifts which index each
+            // core lands at between polls, so a positional compare would
+            // silently diff one CPU's counters against another's.
+            var current_each = new Gee.HashMap<string, CpuSample>();
             UtilizationReading[] readings = {};
             for (int i = 0; i < each.length; i++) {
-                double frac = i < _prev_cpu_each.length
-                    ? busy_fraction(_prev_cpu_each[i], each[i])
-                    : -1.0;
-                readings += new UtilizationReading(each_labels[i], SensorKind.CPU, frac);
+                string label = each_labels[i];
+                CpuSample? prev = _prev_cpu_each.get(label);
+                double frac = prev != null ? busy_fraction(prev, each[i]) : -1.0;
+                readings += new UtilizationReading(label, SensorKind.CPU, frac);
+                current_each.set(label, each[i]);
             }
             _per_cpu = readings;
-            _prev_cpu_each = each;
+            _prev_cpu_each = current_each;
         }
 
         /**
@@ -241,12 +249,18 @@ namespace Singularity {
          * Fields are user nice system idle iowait irq softirq steal guest
          * guest_nice. iowait counts as IDLE: the CPU is not executing during
          * it, and folding it into busy makes a machine waiting on a slow disk
-         * look pegged. Trailing fields are summed generically so a kernel that
-         * adds another one does not silently skew the total.
+         * look pegged. guest and guest_nice are excluded entirely: the kernel
+         * already folds them into user and nice, so adding them again double-
+         * counts guest time on any host running VMs. Remaining trailing
+         * fields are summed generically so a kernel that adds another one
+         * does not silently skew the total.
          */
         private CpuSample parse_cpu_fields(string[] parts) {
             var s = new CpuSample();
             for (int i = 1; i < parts.length; i++) {
+                if (i == 9 || i == 10) {   // guest, guest_nice -- already in user/nice
+                    continue;
+                }
                 int64 v = int64.parse(parts[i]);
                 if (v < 0) {
                     continue;
@@ -529,7 +543,13 @@ namespace Singularity {
                 return false;
             }
 
-            return false;
+            // Neither the device-shape fast path nor the pseudo-filesystem
+            // checks above rejected this mount, so it is a real filesystem --
+            // including ones that are neither /dev/-prefixed nor colon-
+            // bearing, such as a CIFS //server/share mount or a ZFS
+            // pool/dataset. Falling through to false here silently dropped
+            // exactly those from filesystems().
+            return true;
         }
 
         /**
