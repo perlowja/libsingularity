@@ -104,6 +104,39 @@ private void test_cpu_first_sample_is_unknown() {
     teardown();
 }
 
+/**
+ * Per-core samples are matched by cpuN label, not array position.
+ *
+ * CPU hotplug (offlining a lower-numbered core, common on big.LITTLE/power-
+ * gated ARM parts) shifts which index each remaining core lands at between
+ * polls. cpu0 starts idle-looking and cpu1 busy-looking; cpu0 then goes
+ * offline, leaving cpu1 alone at array index 0. A positional compare would
+ * diff cpu1's new sample against cpu0's old one -- a counter regression
+ * (idle goes DOWN), which the -1.0 guard would mask as "unknown" rather
+ * than surface as the wrong number. Label-based matching diffs cpu1
+ * against its own prior sample and produces the real 50%.
+ */
+private void test_per_cpu_survives_hotplug_reindex() {
+    setup();
+    write_proc("stat",
+        "cpu  1000 0 0 1000 0 0 0 0 0 0\n" +
+        "cpu0 0 0 0 1000 0 0 0 0 0 0\n" +
+        "cpu1 1000 0 0 0 0 0 0 0 0 0\n");
+    var m = fresh_monitor();
+    m.poll();
+    // cpu0 offlined; cpu1 is now the only row, at index 0.
+    write_proc("stat",
+        "cpu  1200 0 0 100 0 0 0 0 0 0\n" +
+        "cpu1 1100 0 0 100 0 0 0 0 0 0\n");
+    m.poll();
+
+    var rows = m.per_cpu();
+    assert(rows.length == 1);
+    assert(rows[0].label == "cpu1");
+    assert(approx(rows[0].fraction, 0.5));
+    teardown();
+}
+
 /** Two samples, 200 busy jiffies out of 1000, is 20%. */
 private void test_cpu_delta_fraction() {
     setup();
@@ -133,6 +166,30 @@ private void test_iowait_counts_as_idle() {
     write_proc("stat", "cpu  0 0 0 0 1000 0 0 0 0 0\n");
     m.poll();
     assert(m.cpu_fraction == 0.0);
+    teardown();
+}
+
+/**
+ * guest and guest_nice are already folded into user and nice by the kernel;
+ * summing them again would double-count guest time on any host running VMs.
+ * Same user/idle deltas with wildly different guest values must yield the
+ * same fraction.
+ */
+private void test_cpu_fraction_excludes_guest() {
+    setup();
+    write_proc("stat", "cpu  0 0 0 0 0 0 0 0 0 0\n");
+    var m_no_guest = fresh_monitor();
+    m_no_guest.poll();
+    write_proc("stat", "cpu  50 0 0 50 0 0 0 0 0 0\n");
+    m_no_guest.poll();
+
+    write_proc("stat", "cpu  0 0 0 0 0 0 0 0 0 0\n");
+    var m_with_guest = fresh_monitor();
+    m_with_guest.poll();
+    write_proc("stat", "cpu  50 0 0 50 0 0 0 0 999999 999999\n");
+    m_with_guest.poll();
+
+    assert(approx(m_no_guest.cpu_fraction, m_with_guest.cpu_fraction));
     teardown();
 }
 
@@ -342,6 +399,26 @@ private void test_loop_mounted_images_excluded() {
     teardown();
 }
 
+/**
+ * A real mount that is neither /dev/-prefixed nor colon-bearing -- a CIFS
+ * //server/share or a ZFS pool/dataset -- must still be admitted once it
+ * survives the pseudo-filesystem checks. The fast-path device-shape check
+ * only recognizes /dev/... and host:path forms; falling through past it and
+ * past a clean pseudo-fs check must not default to rejection.
+ */
+private void test_non_dev_real_filesystem_admitted() {
+    setup();
+    write_proc("mounts",
+        "tank/dataset %s zfs rw,relatime 0 0\n".printf(fixture_root));
+    var m = fresh_monitor();
+    m.poll();
+
+    var fs = m.filesystems();
+    assert(fs.length == 1);
+    assert(fs[0].label == fixture_root);
+    teardown();
+}
+
 /** A filesystem reporting no size yields unknown rather than a divide by zero. */
 private void test_zero_sized_capacity_is_unknown() {
     var r = new Singularity.CapacityReading("/x", 0, 0);
@@ -376,7 +453,9 @@ public static int main(string[] args) {
     Test.init(ref args);
     Test.add_func("/utilization/cpu/first-sample-unknown", test_cpu_first_sample_is_unknown);
     Test.add_func("/utilization/cpu/delta-fraction", test_cpu_delta_fraction);
+    Test.add_func("/utilization/cpu/per-core-hotplug-reindex", test_per_cpu_survives_hotplug_reindex);
     Test.add_func("/utilization/cpu/iowait-is-idle", test_iowait_counts_as_idle);
+    Test.add_func("/utilization/cpu/excludes-guest", test_cpu_fraction_excludes_guest);
     Test.add_func("/utilization/cpu/counter-regression", test_cpu_counter_regression_is_unknown);
     Test.add_func("/utilization/cpu/per-core-rows", test_per_cpu_rows);
     Test.add_func("/utilization/mem/available-not-free", test_memory_uses_available_not_free);
@@ -387,6 +466,7 @@ public static int main(string[] args) {
     Test.add_func("/utilization/disk/busy-bounded", test_disk_busy_is_bounded);
     Test.add_func("/utilization/fs/pseudo-excluded", test_pseudo_filesystems_excluded);
     Test.add_func("/utilization/fs/real-deduped", test_real_filesystem_reported_and_deduped);
+    Test.add_func("/utilization/fs/non-dev-admitted", test_non_dev_real_filesystem_admitted);
     Test.add_func("/utilization/fs/loop-images-excluded", test_loop_mounted_images_excluded);
     Test.add_func("/utilization/fs/zero-size-unknown", test_zero_sized_capacity_is_unknown);
     Test.add_func("/utilization/lifecycle/restart-discards-state", test_restart_discards_rate_state);
