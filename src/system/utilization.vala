@@ -98,6 +98,24 @@ namespace Singularity {
         public int interval_seconds { get; set; default = 2; }
 
         /**
+         * Filesystem capacity poll period.
+         *
+         * Defaults to 60 seconds, not the 2 s of interval_seconds. The CPU
+         * panel is a rate: two seconds of jiffies is the granularity the
+         * figure is meaningful at. Disk usage is a stock level: even a busy
+         * nightly rsync moves the bar a fraction of a percent, and the cost
+         * of the round trip is wildly uneven -- a local ext4 statfs returns
+         * in microseconds, but an unreachable NFS/CIFS share blocks until
+         * the kernel's RPC timeout (60-180 s on a default Linux box).
+         * Probing it 30 times a minute to learn something that changes by
+         * minutes is wasted, and at the 2 s cadence a single unresponsive
+         * mount would freeze the main loop every poll. 60 s keeps the figure
+         * fresh enough for a panel and keeps the worst case at one slow
+         * round trip per minute per mount, never on the main thread.
+         */
+        public int fs_interval_seconds { get; set; default = 60; }
+
+        /**
          * Hard ceiling on rows returned by per_cpu() and disks().
          *
          * Sky1 exposes 12 CPUs and a machine with several NVMe devices plus
@@ -126,6 +144,25 @@ namespace Singularity {
         private double _swap_fraction = -1.0;
         private UtilizationReading[] _disks = {};
         private CapacityReading[] _filesystems = {};
+
+        // ---- async filesystem refresh state ------------------------------
+        //
+        // Capacity probing moved off the main loop and onto its own timer
+        // (see fs_interval_seconds). These fields are its bookkeeping: the
+        // cancellable for the in-flight probes, the mount points currently
+        // being queried so we never queue two probes at the same mount, a
+        // cache of last-known readings so a single failed probe does not
+        // vanish from the panel, and per-mount monotonic timestamps of the
+        // last failure for backoff so a wedged NFS share is not re-probed
+        // every fs_interval_seconds and stays one slow round trip per
+        // failure window, not one per panel tick.
+        private uint _fs_timer_id = 0;
+        private GLib.Cancellable? _fs_cancellable = null;
+        private Gee.HashSet<string> _fs_in_flight = new Gee.HashSet<string>();
+        private Gee.HashMap<string, CapacityReading> _fs_known =
+            new Gee.HashMap<string, CapacityReading>();
+        private Gee.HashMap<string, int64?> _fs_failed_at =
+            new Gee.HashMap<string, int64?>();
 
         public UtilizationMonitor() {}
 
@@ -162,7 +199,22 @@ namespace Singularity {
                 poll();
                 return Source.CONTINUE;
             });
+
+            // Capacity refresh lives on its own, slower timer (see
+            // fs_interval_seconds). It is dispatched ASYNCHRONOUSLY so an
+            // unreachable NFS/CIFS share can never freeze the main loop --
+            // query_filesystem_info() against such a mount blocks until the
+            // kernel's RPC timeout, and calling it from poll() every two
+            // seconds was the maintainer-flagged hang risk. A fresh cycle
+            // is also kicked immediately so a panel that just opened does
+            // not wait fs_interval_seconds for the first bar.
+            if (_fs_cancellable == null || _fs_cancellable.is_cancelled()) {
+                _fs_cancellable = new GLib.Cancellable();
+            }
+            schedule_filesystems_timer();
+
             poll();
+            kick_filesystems();
         }
 
         public void stop() {
@@ -170,6 +222,32 @@ namespace Singularity {
                 Source.remove(_timer_id);
                 _timer_id = 0;
             }
+            // Cancel anything in flight so a slow NFS probe does not
+            // outlive the monitor and so dispose() can rely on stop()
+            // actually quietening the channel. _fs_in_flight and _fs_known
+            // are kept on purpose: a caller that reads filesystems() right
+            // after stop() still gets the last reported numbers, and the
+            // in-flight set will be cleared by the cancelled callbacks when
+            // they eventually fire (or simply discarded by the next start).
+            if (_fs_timer_id != 0) {
+                Source.remove(_fs_timer_id);
+                _fs_timer_id = 0;
+            }
+            if (_fs_cancellable != null && !_fs_cancellable.is_cancelled()) {
+                _fs_cancellable.cancel();
+            }
+        }
+
+        /**
+         * Mirror SensorMonitor.dispose() so a caller using `using
+         * UtilisationMonitor` or `Object @ref` semantics gets the same
+         * teardown contract: stop the timers and cancel any in-flight
+         * filesystem probe so the destructor is synchronous from the UI's
+         * point of view.
+         */
+        public override void dispose() {
+            stop();
+            base.dispose();
         }
 
         public bool running { get { return _timer_id != 0; } }
@@ -186,8 +264,215 @@ namespace Singularity {
             read_cpu();
             read_memory();
             read_disks();
-            read_filesystems();
+            // Filesystem capacity probing is intentionally NOT done here.
+            // query_filesystem_info() is synchronous and on an unreachable
+            // NFS/CIFS mount it blocks until the kernel RPC timeout, which
+            // is minutes -- a hang in the middle of the UI's main loop. The
+            // capacity refresh is dispatched asynchronously on its own
+            // slower timer; see kick_filesystems() and the fs_interval_seconds
+            // property for the cadence and rationale.
             updated();
+        }
+
+        /**
+         * Force a filesystem capacity refresh now.
+         *
+         * Public counterpart to the internal timer, so a panel that just
+         * expanded or a user that just clicked "refresh" can pull fresh
+         * numbers without waiting fs_interval_seconds. Returns immediately;
+         * results land asynchronously via the existing query_filesystem_info_async
+         * path. Repeated calls inside one refresh window are coalesced by
+         * the in-flight set -- see kick_filesystems().
+         */
+        public void refresh_filesystems() {
+            kick_filesystems();
+        }
+
+        /**
+         * Read /proc/mounts synchronously and dispatch one async probe per
+         * real, de-duplicated mount.
+         *
+         * The mount-table read itself is a local file (the same one
+         * read_disks already opens) and does not touch the network, so it
+         * is safe on the main loop. The probe per mount is what blocks on
+         * an unreachable share, and that is the call handed to GIO's async
+         * API below.
+         */
+        private void kick_filesystems() {
+            var f = FileStream.open(proc_path("mounts"), "r");
+            if (f == null) {
+                return;
+            }
+
+            // Cycle-local cancel source: every probe in this round ties its
+            // cancellable to _fs_cancellable so a stop() can abort the lot
+            // at once. _fs_in_flight is the per-mount guard that prevents
+            // two overlapping probes for the same mount -- it is checked
+            // and added together so a re-entry cannot squeeze in between.
+            if (_fs_cancellable == null || _fs_cancellable.is_cancelled()) {
+                _fs_cancellable = new GLib.Cancellable();
+            }
+            GLib.Cancellable cycle_cancel = _fs_cancellable;
+
+            var seen_devices = new Gee.HashSet<string>();
+            string? line;
+            while ((line = f.read_line()) != null) {
+                string[] parts = Regex.split_simple("[ \t]+", line.strip());
+                if (parts.length < 3) {
+                    continue;
+                }
+                string device = parts[0];
+                string mount_point = parts[1].compress();  // \040 -> space
+                string fstype = parts[2];
+
+                if (!is_real_filesystem(fstype, device, mount_point)) {
+                    continue;
+                }
+                if (!seen_devices.add(device)) {
+                    continue;
+                }
+                // The in-flight set is checked BEFORE the failure-backoff
+                // check below: if a probe is already pending for this mount
+                // the spec says we must not queue another, regardless of
+                // whether that probe is on its first try or its nth
+                // post-failure retry.
+                if (_fs_in_flight.contains(mount_point)) {
+                    continue;
+                }
+                // Backoff: a mount whose last probe failed is left alone
+                // until the backoff window passes. Without this a wedged
+                // NFS share would have one slow round trip issued every
+                // fs_interval_seconds for the entire life of the monitor,
+                // which simply wastes the RPC timeout. The window is five
+                // minutes by default (5 * fs_interval_seconds), which is
+                // long enough to absorb a transient network blip and short
+                // enough that a recovered share self-heals within the same
+                // panel lifetime.
+                int64 now_us = GLib.get_monotonic_time();
+                int64? failed_at = _fs_failed_at.get(mount_point);
+                if (failed_at != null) {
+                    int64 backoff_us = (int64) fs_interval_seconds * 5 * 1000000;
+                    if (now_us - failed_at < backoff_us) {
+                        continue;
+                    }
+                }
+
+                _fs_in_flight.add(mount_point);
+                probe_one_filesystem.begin(mount_point, cycle_cancel);
+            }
+        }
+
+        /**
+         * The async probe itself. Wrapped as a Vala async method so the
+         * GIO callback can be expressed inline and so the error path
+         * (cancellation, IO error, missing reply) is a single try/catch
+         * instead of nested callback pyramids. The actual blocking call,
+         * query_filesystem_info_async().end(), is where an unreachable
+         * share would otherwise freeze: with the async API the kernel can
+         * do its RPC wait off the main loop and we re-enter only when
+         * there is a result -- or an error -- to react to.
+         *
+         * The in-flight entry for this mount is removed in a finally so
+         * every exit path frees the slot: success, IO error, and the
+         * cancellation that stop()/dispose() issues. Without it, a
+         * cancelled probe would leave the mount blocked out of the next
+         * cycle and a recovered share would never be re-probed until the
+         * monitor was restarted.
+         */
+        private async void probe_one_filesystem(string mount_point,
+                                                GLib.Cancellable cancel) {
+            try {
+                FileInfo? info = null;
+                try {
+                    // io_priority = Priority.DEFAULT (0): a capacity probe has
+                    // no business jumping the queue ahead of the UI's own I/O.
+                    info = yield File.new_for_path(mount_point)
+                        .query_filesystem_info_async(
+                            "filesystem::size,filesystem::used",
+                            GLib.Priority.DEFAULT, cancel);
+                } catch (Error e) {
+                    // Cancellation is the stop()/dispose() path -- do not
+                    // record it as a failure that would feed the backoff
+                    // window, and do not rebuild the published list: another
+                    // cycle will repopulate it when start() runs again.
+                    if (cancel.is_cancelled()) {
+                        return;
+                    }
+                    // A real failure (mount unreachable, transport hung up,
+                    // autofs not triggered, ...). Record the timestamp so
+                    // the backoff in kick_filesystems() skips this mount for
+                    // the next five windows, and leave the previously-known
+                    // reading in place rather than yanking the row -- a
+                    // panel that has been showing "CIFS share: 72%" should
+                    // not blink the row out of existence every
+                    // fs_interval_seconds while the share is flaky.
+                    _fs_failed_at.set(mount_point, GLib.get_monotonic_time());
+                    publish_filesystems();
+                    return;
+                }
+
+                if (info == null) {
+                    _fs_failed_at.set(mount_point, GLib.get_monotonic_time());
+                    publish_filesystems();
+                    return;
+                }
+
+                uint64 size = info.get_attribute_uint64("filesystem::size");
+                if (size == 0) {
+                    // Same rule as the synchronous version: a filesystem
+                    // that reports no size is not a useful row. Forget the
+                    // cached value so a subsequent probe that returns a
+                    // real size becomes visible immediately, rather than
+                    // waiting out the backoff.
+                    _fs_known.unset(mount_point);
+                    _fs_failed_at.unset(mount_point);
+                    publish_filesystems();
+                    return;
+                }
+
+                uint64 used = info.get_attribute_uint64("filesystem::used");
+                _fs_known.set(mount_point,
+                              new CapacityReading(mount_point, used, size));
+                _fs_failed_at.unset(mount_point);
+                publish_filesystems();
+            } finally {
+                // Every exit path -- success, IO error, cancellation --
+                // frees the in-flight slot. See the method comment.
+                _fs_in_flight.remove(mount_point);
+            }
+        }
+
+        /**
+         * Recompute the published _filesystems array from the cache of
+         * last-known readings and emit updated() once per probe completion
+         * (not once per cycle). The cache is the source of truth so a
+         * probe that errors does NOT remove its row -- the row simply
+         * stays at whatever it was last successful at.
+         */
+        private void publish_filesystems() {
+            CapacityReading[] rows = {};
+            foreach (var entry in _fs_known) {
+                rows += entry.value;
+            }
+            _filesystems = rows;
+            updated();
+        }
+
+        /**
+         * (Re)install the filesystem-refresh timer.
+         *
+         * Idempotent: removing a zero _fs_timer_id is a no-op. Called
+         * from start() once; stop() removes the source.
+         */
+        private void schedule_filesystems_timer() {
+            if (_fs_timer_id != 0) {
+                Source.remove(_fs_timer_id);
+                _fs_timer_id = 0;
+            }
+            _fs_timer_id = Timeout.add_seconds(fs_interval_seconds, () => {
+                kick_filesystems();
+                return Source.CONTINUE;
+            });
         }
 
         // ---- CPU ----------------------------------------------------------
@@ -425,6 +710,14 @@ namespace Singularity {
         /**
          * Space used per mounted filesystem.
          *
+         * Done ASYNCHRONOUSLY (see kick_filesystems and probe_one_filesystem)
+         * rather than inline in poll(), because query_filesystem_info() on an
+         * unreachable NFS/CIFS mount blocks until the kernel's RPC timeout --
+         * minutes -- and doing that on the UI's main loop froze the shell.
+         * The mount-table scan itself (read /proc/mounts, filter pseudo-fs,
+         * dedupe by device) is a cheap local file read and stays synchronous
+         * inside kick_filesystems; only the per-mount statfs is async.
+         *
          * Pseudo filesystems are filtered via GUnixMountEntry when reading
          * the real /proc/mounts (the static rule list inside glib is
          * broader than the hand-maintained one this used to carry), and via
@@ -436,54 +729,6 @@ namespace Singularity {
          * de-duplicated so a bind mount does not report the same storage
          * twice.
          */
-        private void read_filesystems() {
-            var f = FileStream.open(proc_path("mounts"), "r");
-            if (f == null) {
-                return;
-            }
-
-            CapacityReading[] readings = {};
-            var seen_devices = new Gee.HashSet<string>();
-
-            string? line;
-            while ((line = f.read_line()) != null) {
-                string[] parts = Regex.split_simple("[ \t]+", line.strip());
-                if (parts.length < 3) {
-                    continue;
-                }
-                string device = parts[0];
-                string mount_point = parts[1].compress();  // \040 -> space
-                string fstype = parts[2];
-
-                if (!is_real_filesystem(fstype, device, mount_point)) {
-                    continue;
-                }
-                if (!seen_devices.add(device)) {
-                    continue;
-                }
-                if (readings.length >= MAX_ROWS) {
-                    break;
-                }
-
-                try {
-                    var info = File.new_for_path(mount_point)
-                        .query_filesystem_info("filesystem::size,filesystem::used", null);
-                    uint64 size = info.get_attribute_uint64("filesystem::size");
-                    if (size == 0) {
-                        continue;
-                    }
-                    uint64 used = info.get_attribute_uint64("filesystem::used");
-                    readings += new CapacityReading(mount_point, used, size);
-                } catch (Error e) {
-                    // An unreadable mount is normal -- an autofs point that is
-                    // not triggered, or another user's namespace. Skip it; it
-                    // is not an error worth surfacing in a panel.
-                    continue;
-                }
-            }
-
-            _filesystems = readings;
-        }
 
         private bool is_real_filesystem(string fstype, string device, string mount_point) {
             // Mounted disk images are always 100% full -- an image is written
