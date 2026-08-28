@@ -48,7 +48,6 @@ namespace Singularity {
         public signal void state_changed();
         public signal void vpn_state_changed();
         public signal void vpn_connections_changed();
-        // Result of a user-initiated VPN action (import / manual add / remove).
         public signal void vpn_action_result(bool success, string message);
 
         public bool wifi_hotspot_active { get; private set; default = false; }
@@ -72,6 +71,43 @@ namespace Singularity {
         // NetworkManager connection types we treat as "VPN" in the UI.
         private static bool is_vpn_type(string? t) {
             return t == "vpn" || t == "wireguard";
+        }
+
+        private string vpn_failure_message(NM.ActiveConnectionStateReason reason) {
+            switch (reason) {
+                case NM.ActiveConnectionStateReason.LOGIN_FAILED:
+                    return "VPN authentication failed";
+                case NM.ActiveConnectionStateReason.NO_SECRETS:
+                    return "VPN credentials are missing";
+                case NM.ActiveConnectionStateReason.CONNECT_TIMEOUT:
+                case NM.ActiveConnectionStateReason.SERVICE_START_TIMEOUT:
+                    return "VPN connection timed out";
+                case NM.ActiveConnectionStateReason.IP_CONFIG_INVALID:
+                    return "The VPN returned an invalid network configuration";
+                case NM.ActiveConnectionStateReason.SERVICE_START_FAILED:
+                case NM.ActiveConnectionStateReason.SERVICE_STOPPED:
+                    return "The VPN service could not start";
+                default:
+                    return "VPN connection failed";
+            }
+        }
+
+        private void watch_vpn_connection(NM.ActiveConnection active) {
+            if (!is_vpn_type(active.get_connection_type())) return;
+            active.state_changed.connect((state, reason) => {
+                update_vpn_state();
+                if (state == NM.ActiveConnectionState.ACTIVATED) {
+                    vpn_action_result(true, "VPN connected");
+                } else if (state == NM.ActiveConnectionState.DEACTIVATED
+                    && reason != NM.ActiveConnectionStateReason.NONE
+                    && reason != NM.ActiveConnectionStateReason.USER_DISCONNECTED
+                    && reason != NM.ActiveConnectionStateReason.CONNECTION_REMOVED) {
+                    vpn_action_result(false,
+                        vpn_failure_message((NM.ActiveConnectionStateReason) reason));
+                }
+            });
+            if (active is NM.VpnConnection)
+                active.notify["vpn-state"].connect(() => update_vpn_state());
         }
 
         private NM.Client? client;
@@ -101,18 +137,7 @@ namespace Singularity {
                         update_state();
                     });
                     client.active_connection_added.connect((active) => {
-                        if (active is NM.VpnConnection) {
-                            var vpn_conn = (NM.VpnConnection) active;
-                            vpn_conn.notify["vpn-state"].connect(() => {
-                                update_vpn_state();
-                            });
-                        } else if (is_vpn_type(active.get_connection_type())) {
-                            // WireGuard et al. activate as a plain ActiveConnection;
-                            // track their generic state instead of vpn-state.
-                            active.notify["state"].connect(() => {
-                                update_vpn_state();
-                            });
-                        }
+                        watch_vpn_connection(active);
                         update_vpn_state();
                         refresh_sharing_state();
                     });
@@ -126,6 +151,8 @@ namespace Singularity {
                     client.connection_removed.connect((conn) => {
                         vpn_connections_changed();
                     });
+                    foreach (var active in client.get_active_connections())
+                        watch_vpn_connection(active);
                     update_state();
                     update_vpn_state();
                     refresh_sharing_state();
@@ -439,52 +466,91 @@ namespace Singularity {
             return VpnLinkState.DISCONNECTED;
         }
 
-        // Deactivate a specific VPN connection by matching its active instance.
-        public void deactivate_connection(NM.RemoteConnection conn) {
-            if (client == null) return;
-            string uuid = conn.get_uuid();
-            foreach (var ac in client.get_active_connections()) {
-                if (ac.get_uuid() == uuid) {
-                    client.deactivate_connection_async.begin(ac, null, (obj, res) => {
-                        try {
-                            client.deactivate_connection_async.end(res);
-                        } catch (Error e) {
-                            warning("VPN disconnect failed: %s", e.message);
-                        }
-                    });
-                    return;
-                }
+        private NM.ActiveConnection? get_active_vpn(string uuid) {
+            if (client == null) return null;
+            foreach (var active in client.get_active_connections()) {
+                if (active.get_uuid() == uuid && is_vpn_type(active.get_connection_type()))
+                    return active;
+            }
+            return null;
+        }
+
+        private async bool disable_vpn_autoconnect(NM.RemoteConnection conn) {
+            var setting = conn.get_setting_connection();
+            if (setting == null || !setting.autoconnect) return true;
+            setting.autoconnect = false;
+            try {
+                return yield conn.commit_changes_async(true, null);
+            } catch (Error e) {
+                vpn_action_result(false, "Could not save VPN state: " + e.message);
+                return false;
             }
         }
 
-        // Permanently remove a VPN connection ("forget").
-        public void delete_vpn(NM.RemoteConnection conn) {
-            conn.delete_async.begin(null, (obj, res) => {
-                try {
-                    conn.delete_async.end(res);
-                    vpn_action_result(true, "VPN removed");
-                    vpn_connections_changed();
-                } catch (Error e) {
-                    vpn_action_result(false, "Could not remove VPN: " + e.message);
-                }
-            });
+        private async bool deactivate_vpn(NM.RemoteConnection conn, bool save_state) {
+            if (client == null) return false;
+            if (save_state && !(yield disable_vpn_autoconnect(conn))) return false;
+
+            var active = get_active_vpn(conn.get_uuid());
+            if (active == null) return true;
+            try {
+                return yield client.deactivate_connection_async(active, null);
+            } catch (Error e) {
+                vpn_action_result(false, "Could not disconnect VPN: " + e.message);
+                return false;
+            }
         }
 
-        public void activate_vpn(NM.RemoteConnection conn) {
-            if (client == null) return;
-            client.activate_connection_async.begin(conn, null, null, null, (obj, res) => {
-                try {
-                    client.activate_connection_async.end(res);
-                } catch (Error e) {
-                    warning("VPN connect failed: %s", e.message);
-                }
-            });
+        public async void deactivate_connection(NM.RemoteConnection conn) {
+            bool ok = yield deactivate_vpn(conn, true);
+            if (ok) vpn_action_result(true, "VPN disconnected");
+            update_vpn_state();
+        }
+
+        public async void delete_vpn(NM.RemoteConnection conn) {
+            if (!(yield deactivate_vpn(conn, false))) return;
+            try {
+                yield conn.delete_async(null);
+                vpn_action_result(true, "VPN removed");
+                vpn_connections_changed();
+            } catch (Error e) {
+                vpn_action_result(false, "Could not remove VPN: " + e.message);
+            }
+        }
+
+        public async void activate_vpn(NM.RemoteConnection conn) {
+            if (client == null) {
+                vpn_action_result(false, "NetworkManager unavailable");
+                return;
+            }
+
+            var active_vpns = new GenericArray<NM.RemoteConnection>();
+            foreach (var active in client.get_active_connections()) {
+                if (!is_vpn_type(active.get_connection_type()) || active.get_uuid() == conn.get_uuid())
+                    continue;
+                var remote = active.get_connection() as NM.RemoteConnection;
+                if (remote != null) active_vpns.add(remote);
+            }
+            for (int i = 0; i < active_vpns.length; i++) {
+                if (!(yield deactivate_vpn(active_vpns.get(i), true))) return;
+            }
+
+            try {
+                yield client.activate_connection_async(conn, null, null, null);
+            } catch (Error e) {
+                vpn_action_result(false, "Could not connect VPN: " + e.message);
+            }
+            update_vpn_state();
         }
 
         // Add a fully-built connection through libnm (same D-Bus/polkit path as
         // GNOME) and report the outcome.
         private async bool add_connection(NM.Connection conn, string ok_msg) {
             if (client == null) { vpn_action_result(false, "NetworkManager unavailable"); return false; }
+            if (is_vpn_type(conn.get_connection_type())) {
+                var setting = conn.get_setting_connection();
+                if (setting != null) setting.autoconnect = false;
+            }
             try {
                 var added = yield client.add_connection_async(conn, true, null);
                 bool ok = (added != null);
