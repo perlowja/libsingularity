@@ -3918,15 +3918,8 @@ window.singularity.dialog {
     margin-top: 2px;
 }
 
-.singularity .confirm-row .confirm-content {
-    background-color: alpha(@destructive_color, 0.08);
-    border-top: 1px solid alpha(@destructive_color, 0.2);
-    border-radius: 0 0 8px 8px;
-    padding: 8px 12px;
-}
-
-.singularity .confirm-row.revealed {
-    background-color: alpha(@destructive_color, 0.04);
+.singularity .preferences-row.confirming:hover {
+    background-color: transparent;
 }
 
 .singularity .expander-content {

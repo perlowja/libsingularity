@@ -178,123 +178,128 @@ namespace Singularity.Widgets {
                 list_box.remove(child);
                 child = next;
             }
+            rows.clear();
         }
     }
 
-    /**
-     * An ActionRow that expands to show a confirmation prompt when activated.
-     *
-     * Clicking the row reveals a message with Confirm and Cancel buttons.
-     * If confirmed, the `confirmed` signal is emitted and the row collapses.
-     * If cancelled, the row collapses without action.
-     */
-    public class ConfirmRow : ActionRow {
-        private Revealer revealer;
-        private Button confirm_btn;
-        private Button cancel_btn;
-        private bool confirming = false;
-
-        public signal void confirmed();
-
-        public string confirm_label {
-            get { return confirm_btn.label; }
-            set { confirm_btn.label = value; }
-        }
-        public string cancel_label {
-            get { return cancel_btn.label; }
-            set { cancel_btn.label = value; }
-        }
-
-        public ConfirmRow(string title, string? subtitle = null, string? icon_name = null) {
-            base(title, subtitle, icon_name);
-            add_css_class("confirm-row");
-
-            var delete_btn = new Button.from_icon_name("user-trash-symbolic");
-            delete_btn.add_css_class("flat");
-            delete_btn.add_css_class("destructive-action");
-            delete_btn.clicked.connect(() => {
-                revealer.reveal_child = true;
-                add_css_class("revealed");
-            });
-            add_suffix(delete_btn);
-
-            var internal_box = new Box(Orientation.VERTICAL, 0);
-            internal_box.hexpand = true;
-            var header = this.get_child();
-            if (header != null) {
-                this.set_child(null);
-                header.valign = Align.CENTER;
-                header.vexpand = true;
-                internal_box.append(header);
-            }
-
-            revealer = new Revealer();
-            revealer.transition_type = RevealerTransitionType.SLIDE_DOWN;
-
-            var confirm_box = new Box(Orientation.HORIZONTAL, 12);
-            confirm_box.add_css_class("confirm-content");
-            confirm_box.margin_top = 8;
-            confirm_box.margin_bottom = 4;
-            confirm_box.margin_start = 12;
-            confirm_box.margin_end = 12;
-
-            var msg = new Label(subtitle ?? title);
-            msg.hexpand = true;
-            msg.wrap = true;
-            msg.add_css_class("dim-label");
-            confirm_box.append(msg);
-
-            cancel_btn = new Button.with_label(_("Cancel"));
-            cancel_btn.add_css_class("flat");
-            cancel_btn.clicked.connect(() => {
-                confirming = false;
-                revealer.reveal_child = false;
-            });
-            confirm_box.append(cancel_btn);
-
-            confirm_btn = new Button.with_label(_("Remove"));
-            confirm_btn.add_css_class("destructive-action");
-            confirm_btn.clicked.connect(() => {
-                confirming = true;
-                revealer.reveal_child = false;
-            });
-            confirm_box.append(confirm_btn);
-
-            revealer.set_child(confirm_box);
-            internal_box.append(revealer);
-            this.set_child(internal_box);
-
-            this.activatable = false;
-            var gesture = new GestureClick();
-            header.add_controller(gesture);
-            gesture.released.connect((n, x, y) => {
-                if (revealer.reveal_child) {
-                    confirming = false;
-                    revealer.reveal_child = false;
-                } else {
-                    msg.label = subtitle ?? title;
-                    revealer.reveal_child = true;
-                    add_css_class("revealed");
-                }
-            });
-
-            revealer.notify["reveal-child"].connect(() => {
-                if (!revealer.reveal_child) {
-                    remove_css_class("revealed");
-                    if (confirming) {
-                        confirming = false;
-                        confirmed();
-                    }
-                }
-            });
-        }
+    public enum ConfirmationSuggestedAction {
+        CONFIRM,
+        CANCEL
     }
 
     /** Base class for all rows in a PreferencesGroup. */
     public class PreferencesRow : ListBoxRow {
+        private Stack? confirmation_stack;
+        private Button? confirmation_confirm_button;
+        private Button? confirmation_cancel_button;
+        private bool confirmation_dismissing = false;
+
+        public bool confirmation_visible { get; private set; default = false; }
+        protected bool confirmation_blocks_activation {
+            get { return confirmation_visible || confirmation_dismissing; }
+        }
+        public signal void confirmation_requested(string confirm_label, string cancel_label,
+            ConfirmationSuggestedAction suggested_action);
+        public signal void confirmed();
+        public signal void confirmation_cancelled();
 
         public PreferencesRow() {
+            Object();
+        }
+
+        construct {
             add_css_class("preferences-row");
+            confirmation_requested.connect(show_confirmation);
+        }
+
+        private void show_confirmation(string confirm_label, string cancel_label,
+                                       ConfirmationSuggestedAction suggested_action) {
+            if (confirmation_stack == null) {
+                var content = get_child();
+                if (content == null) return;
+
+                set_child(null);
+                confirmation_stack = new Stack();
+                confirmation_stack.transition_type = StackTransitionType.SLIDE_LEFT_RIGHT;
+                confirmation_stack.transition_duration = 220;
+                confirmation_stack.add_named(content, "content");
+
+                var buttons = new Box(Orientation.HORIZONTAL, 8);
+                buttons.add_css_class("row-confirmation");
+                buttons.halign = Align.CENTER;
+                buttons.valign = Align.CENTER;
+                buttons.margin_top = 8;
+                buttons.margin_bottom = 8;
+                buttons.margin_start = 12;
+                buttons.margin_end = 12;
+
+                confirmation_cancel_button = new Button();
+                confirmation_cancel_button.add_css_class("pill");
+                confirmation_cancel_button.clicked.connect(() => {
+                    hide_confirmation();
+                    confirmation_cancelled();
+                });
+                buttons.append(confirmation_cancel_button);
+
+                confirmation_confirm_button = new Button();
+                confirmation_confirm_button.add_css_class("pill");
+                confirmation_confirm_button.clicked.connect(() => {
+                    hide_confirmation();
+                    confirmed();
+                });
+                buttons.append(confirmation_confirm_button);
+
+                confirmation_stack.add_named(buttons, "confirmation");
+                set_child(confirmation_stack);
+            }
+
+            confirmation_confirm_button.label = confirm_label;
+            confirmation_cancel_button.label = cancel_label;
+            confirmation_confirm_button.remove_css_class("suggested-action");
+            confirmation_cancel_button.remove_css_class("suggested-action");
+            if (suggested_action == ConfirmationSuggestedAction.CONFIRM)
+                confirmation_confirm_button.add_css_class("suggested-action");
+            else
+                confirmation_cancel_button.add_css_class("suggested-action");
+
+            confirmation_visible = true;
+            add_css_class("confirming");
+            confirmation_stack.visible_child_name = "confirmation";
+        }
+
+        private void hide_confirmation() {
+            if (confirmation_stack == null) return;
+            confirmation_visible = false;
+            confirmation_dismissing = true;
+            remove_css_class("confirming");
+            confirmation_stack.visible_child_name = "content";
+            Idle.add(() => {
+                confirmation_dismissing = false;
+                return Source.REMOVE;
+            });
+        }
+    }
+
+    public class ConfirmRow : ActionRow {
+        public string confirm_label { get; set; default = _("Remove"); }
+        public string cancel_label { get; set; default = _("Cancel"); }
+        public ConfirmationSuggestedAction suggested_action {
+            get; set; default = ConfirmationSuggestedAction.CANCEL;
+        }
+
+        public ConfirmRow(string title, string? subtitle = null, string? icon_name = null) {
+            base(title, subtitle, icon_name);
+
+            var delete_btn = new Button.from_icon_name("user-trash-symbolic");
+            delete_btn.add_css_class("flat");
+            delete_btn.add_css_class("destructive-action");
+            delete_btn.clicked.connect(request_confirmation);
+            add_suffix(delete_btn);
+            activated.connect(request_confirmation);
+        }
+
+        private void request_confirmation() {
+            confirmation_requested(confirm_label, cancel_label, suggested_action);
         }
     }
     /**
@@ -384,9 +389,21 @@ namespace Singularity.Widgets {
             this.activatable = true;
             var gesture = new GestureClick();
             gesture.released.connect((n, x, y) => {
+                if (has_interactive_child_at(x, y)) return;
                 activate();
             });
             add_controller(gesture);
+        }
+
+        private bool has_interactive_child_at(double x, double y) {
+            Widget? target = pick(x, y, PickFlags.DEFAULT);
+            while (target != null && target != this) {
+                if (target is Button || target is Switch || target is Entry ||
+                    target is SpinButton || target is DropDown || target is Scale)
+                    return true;
+                target = target.get_parent();
+            }
+            return false;
         }
 
     /**
@@ -408,6 +425,7 @@ namespace Singularity.Widgets {
         }
 
         public override void activate() {
+            if (confirmation_blocks_activation) return;
             // Do NOT call base.activate(): it would emit ListBox::row-activated
             // which, combined with this direct call, would fire activated() twice.
             activated();
