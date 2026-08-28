@@ -39,6 +39,51 @@ private bool approx(double a, double b) {
     return d < 0.0001;
 }
 
+/**
+ * Pump the default MainContext until it goes idle, up to a cap.
+ *
+ * Used to let the async query_filesystem_info_async callbacks land in the
+ * filesystem-related tests. Without this, a test that calls m.poll() and then
+ * immediately asserts on m.filesystems() would race the GIO worker thread --
+ * the assert would see an empty list, and the callback would land later.
+ *
+ * Cap is generous (1000 iterations) so even a slow CI box finishes, but
+ * bounded so a regression that loops forever instead of returning cannot
+ * hang the test binary. Returns the number of iterations actually consumed.
+ */
+private int pump_main_context() {
+    GLib.MainContext ctx = GLib.MainContext.default();
+    int n = 0;
+    while (n < 1000 && ctx.iteration(false)) {
+        n++;
+    }
+    return n;
+}
+
+/**
+ * Pump the default MainContext until a predicate is true, or we hit the cap.
+ *
+ * Used when the test's success condition is observable on the monitor itself
+ * (e.g. filesystems().length == 1) but the only thing we know to wait for is
+ * a GIO async callback firing on the main context. iteration(false) returns
+ * false when the context has no more work to dispatch, so a missing callback
+ * exits the loop on the very next call and the predicate decides whether we
+ * waited long enough.
+ */
+private delegate bool ReadyFn();
+
+private void pump_until(ReadyFn ready) {
+    GLib.MainContext ctx = GLib.MainContext.default();
+    for (int n = 0; n < 1000 && !ready(); n++) {
+        if (!ctx.iteration(false)) {
+            // Context has no more work to dispatch right now. Sleep briefly
+            // so the worker thread GIO spun up to run our statfs gets a
+            // chance to finish and post its result before we time out.
+            Thread.usleep(1000);   // 1 ms
+        }
+    }
+}
+
 private Singularity.UtilizationMonitor fresh_monitor() {
     var m = new Singularity.UtilizationMonitor();
     m.proc_root = fixture_root;
@@ -350,6 +395,12 @@ private void test_pseudo_filesystems_excluded() {
         "cgroup2 /sys/fs/cgroup cgroup2 rw 0 0\n");
     var m = fresh_monitor();
     m.poll();
+    m.refresh_filesystems();
+    // No async probes are dispatched for pseudo filesystems, so filesystems()
+    // is permanently empty here. pump_until's sleep-on-idle loop would just
+    // time out, so pump_main_context (which exits as soon as the context
+    // drains) is the right primitive.
+    pump_main_context();
     assert(m.filesystems().length == 0);
     teardown();
 }
@@ -368,6 +419,12 @@ private void test_real_filesystem_reported_and_deduped() {
         "proc /proc proc rw 0 0\n");
     var m = fresh_monitor();
     m.poll();
+    m.refresh_filesystems();
+    // The async probe lands on the main context once the worker thread
+    // completes; pump_main_context exits the moment the context drains,
+    // which can be BEFORE the worker has posted its result. Wait until
+    // filesystems() actually reports one row.
+    pump_until(() => m.filesystems().length == 1);
 
     var fs = m.filesystems();
     assert(fs.length == 1);
@@ -392,6 +449,8 @@ private void test_loop_mounted_images_excluded() {
         "/dev/fake0 %s ext4 rw,relatime 0 0\n".printf(fixture_root));
     var m = fresh_monitor();
     m.poll();
+    m.refresh_filesystems();
+    pump_until(() => m.filesystems().length == 1);
 
     var fs = m.filesystems();
     assert(fs.length == 1);
@@ -412,6 +471,8 @@ private void test_non_dev_real_filesystem_admitted() {
         "tank/dataset %s zfs rw,relatime 0 0\n".printf(fixture_root));
     var m = fresh_monitor();
     m.poll();
+    m.refresh_filesystems();
+    pump_until(() => m.filesystems().length == 1);
 
     var fs = m.filesystems();
     assert(fs.length == 1);
@@ -423,6 +484,80 @@ private void test_non_dev_real_filesystem_admitted() {
 private void test_zero_sized_capacity_is_unknown() {
     var r = new Singularity.CapacityReading("/x", 0, 0);
     assert(r.fraction == -1.0);
+}
+
+/**
+ * poll() must NOT block on filesystem probing.
+ *
+ * The maintainer-flagged hang risk was a synchronous query_filesystem_info()
+ * inside poll() against an unreachable NFS/CIFS share. We model that with a
+ * mount point that does not exist: the GIO statfs call returns G_IO_ERROR
+ * NOT_FOUND, which the async probe handles in its catch block. Two things
+ * must be true after this test runs:
+ *
+ *   1. poll() returns in bounded time without populating filesystems().
+ *      This is the contract change -- capacity is now async, never sync.
+ *   2. After pumping the main context, only the GOOD mount appears in
+ *      filesystems(). The bad one errored out and was suppressed, never
+ *      surfaced to the panel.
+ *
+ * The bad mount also exercises the cancellation / error paths in
+ * probe_one_filesystem, so a regression that throws out of the catch would
+ * fail here too.
+ */
+private void test_poll_does_not_probe_filesystems_synchronously() {
+    setup();
+    string bad_path = "/nonexistent/singularity/utilization/test"
+                      + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    write_proc("mounts",
+        "/dev/fake0 %s ext4 rw 0 0\n".printf(fixture_root) +
+        "/dev/fake0 %s ext4 rw 0 0\n".printf(bad_path));
+    var m = fresh_monitor();
+    m.poll();
+    // poll() must have returned without touching filesystems().
+    assert(m.filesystems().length == 0);
+
+    m.refresh_filesystems();
+    // Wait specifically for the GOOD probe's callback to land. The bad one
+    // records a failure and never publishes a row, so filesystems().length
+    // is the right thing to wait on.
+    pump_until(() => m.filesystems().length == 1);
+
+    var fs = m.filesystems();
+    assert(fs.length == 1);
+    assert(fs[0].label == fixture_root);
+    teardown();
+}
+
+/**
+ * dispose() must quieten the channel, matching SensorMonitor.
+ *
+ * A caller using `using` semantics relies on the destructor to stop the
+ * timers and cancel any in-flight async probe -- otherwise a panel that
+ * gets torn down while a slow probe is pending would leave the GIO worker
+ * thread holding a reference, leaking the monitor across the dispose.
+ *
+ * The check is "running goes false after dispose()". The running property
+ * reads the private _timer_id field, which stop() clears to zero before
+ * base.dispose() runs -- a regression that forgot stop() would leave the
+ * timer live and the field non-zero. Calling stop() again after dispose()
+ * is also exercised: it must be idempotent (Source.remove on a zero id is
+ * a no-op via the guard at the top of stop()), proving stop() really did
+ * get invoked and not merely bypassed.
+ */
+private void test_dispose_calls_stop() {
+    setup();
+    var m = fresh_monitor();
+    m.start();
+    assert(m.running);
+    m.dispose();
+    assert(!m.running);
+    // Idempotent: a second stop() after dispose() must not throw or assert.
+    // Catches the regression where dispose() returns without actually
+    // calling stop() -- stop()'s own _timer_id guard would not have fired.
+    m.stop();
+    assert(!m.running);
+    teardown();
 }
 
 /* ---- lifecycle -------------------------------------------------------- */
@@ -469,6 +604,8 @@ public static int main(string[] args) {
     Test.add_func("/utilization/fs/non-dev-admitted", test_non_dev_real_filesystem_admitted);
     Test.add_func("/utilization/fs/loop-images-excluded", test_loop_mounted_images_excluded);
     Test.add_func("/utilization/fs/zero-size-unknown", test_zero_sized_capacity_is_unknown);
+    Test.add_func("/utilization/fs/poll-does-not-block", test_poll_does_not_probe_filesystems_synchronously);
+    Test.add_func("/utilization/lifecycle/dispose-calls-stop", test_dispose_calls_stop);
     Test.add_func("/utilization/lifecycle/restart-discards-state", test_restart_discards_rate_state);
     return Test.run();
 }
