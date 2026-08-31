@@ -62,6 +62,18 @@ private void cpufreq_policy(int n, int cur_khz, int max_khz) {
     }
 }
 
+private void drm_client(int pid, int fd, string client_id,
+                        uint64 render_ns, uint64 copy_ns = 0) {
+    string path = Path.build_filename(fixture_root, "proc", pid.to_string(),
+                                      "fdinfo", fd.to_string());
+    write_file(path,
+        "drm-driver:\ti915\n" +
+        "drm-client-id:\t%s\n".printf(client_id) +
+        "drm-pdev:\t0000:00:02.0\n" +
+        "drm-engine-render:\t%s ns\n".printf(render_ns.to_string()) +
+        "drm-engine-copy:\t%s ns\n".printf(copy_ns.to_string()));
+}
+
 private Singularity.SensorReading? reading_named(Singularity.SensorMonitor m,
                                                  string needle) {
     foreach (Singularity.SensorReading r in m.readings()) {
@@ -654,6 +666,39 @@ private void test_independent_unlabelled_sensors_survive() {
     assert(nics == 2);
 }
 
+private void test_amd_gpu_busy_percent() {
+    reset_fixture();
+    write_file(Path.build_filename(fixture_root, "sys", "class", "drm",
+                                   "card0", "device", "gpu_busy_percent"),
+               "37\n");
+
+    var m = monitor_for_fixture();
+    assert(Math.fabs(m.gpu_utilization - 0.37) < 0.001);
+}
+
+private void test_drm_clients_are_deduplicated() {
+    reset_fixture();
+    drm_client(100, 4, "7", 100000000);
+    drm_client(100, 5, "7", 100000000);
+
+    var m = new Singularity.SensorMonitor();
+    m.sysfs_root = fixture_root;
+    m.sample_gpu_utilization(1000000);
+    assert(m.gpu_utilization == 0.0);
+
+    drm_client(100, 4, "7", 500000000);
+    drm_client(100, 5, "7", 500000000);
+    m.sample_gpu_utilization(2000000);
+    assert(Math.fabs(m.gpu_utilization - 0.4) < 0.001);
+}
+
+private void test_nvidia_utilization_csv() {
+    var m = new Singularity.SensorMonitor();
+    m.parse_nvidia("NVIDIA RTX, 52, 2100, 125.4, 64\n");
+    assert(Math.fabs(m.gpu_utilization - 0.64) < 0.001);
+    assert(m.gpu_power_milliwatts == 125400);
+}
+
 public int main(string[] args) {
     Test.init(ref args);
     Test.add_func("/sensor/unknown-never-cpu", test_unknown_sensors_are_never_cpu);
@@ -680,6 +725,9 @@ public int main(string[] args) {
     Test.add_func("/sensor/vpu-npu-not-gpu", test_vpu_and_npu_are_not_the_gpu);
     Test.add_func("/sensor/labelled-shadows-twin", test_labelled_reading_shadows_unlabelled_twin);
     Test.add_func("/sensor/independent-unlabelled-survive", test_independent_unlabelled_sensors_survive);
+    Test.add_func("/sensor/amd-gpu-busy-percent", test_amd_gpu_busy_percent);
+    Test.add_func("/sensor/drm-clients-deduplicated", test_drm_clients_are_deduplicated);
+    Test.add_func("/sensor/nvidia-utilization-csv", test_nvidia_utilization_csv);
     int rc = Test.run();
     if (fixture_root != null && FileUtils.test(fixture_root, FileTest.EXISTS)) {
         remove_path(File.new_for_path(fixture_root));

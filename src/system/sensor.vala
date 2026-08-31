@@ -312,6 +312,8 @@ namespace Singularity {
         private const string THERMAL_DIR = "/sys/class/thermal";
         private const string CPUFREQ_DIR = "/sys/devices/system/cpu/cpufreq";
         private const string CPUINFO_PATH = "/proc/cpuinfo";
+        private const string DRM_DIR = "/sys/class/drm";
+        private const string PROC_DIR = "/proc";
 
         /**
          * Prefix applied to every path this class reads.
@@ -398,6 +400,8 @@ namespace Singularity {
         private string thermal_dir() { return sysfs_root + THERMAL_DIR; }
         private string cpufreq_dir() { return sysfs_root + CPUFREQ_DIR; }
         private string cpuinfo_path() { return sysfs_root + CPUINFO_PATH; }
+        private string drm_dir() { return sysfs_root + DRM_DIR; }
+        private string proc_dir() { return sysfs_root + PROC_DIR; }
 
         // Kernel driver names, not product names.
         private const string[] CPU_CHIPS = {
@@ -489,6 +493,11 @@ namespace Singularity {
         private bool _nvidia_present = false;
         private bool _nvidia_checked = false;
         private bool _nvidia_in_flight = false;
+        private double _base_gpu_utilization = -1.0;
+        private double _nvidia_gpu_utilization = -1.0;
+        private int64 _last_gpu_sample_us = 0;
+        private Gee.HashMap<string, uint64?> _drm_counters =
+            new Gee.HashMap<string, uint64?>();
 
         /** Hottest sensor positively identified as a CPU, or -1 if none. */
         public int cpu_millidegrees { get; private set; default = -1; }
@@ -502,6 +511,8 @@ namespace Singularity {
         public bool available { get; private set; default = false; }
         /** GPU power draw where the hardware reports it, else -1. */
         public int gpu_power_milliwatts { get; private set; default = -1; }
+        /** GPU utilization from 0.0 to 1.0, or -1 when unavailable. */
+        public double gpu_utilization { get; private set; default = -1.0; }
 
         /**
          * Substring identifying the CPU/GPU sensor on hardware the allow-list
@@ -956,6 +967,165 @@ namespace Singularity {
             return found;
         }
 
+        private double collect_amd_gpu_utilization() {
+            double best = -1.0;
+            Dir dir;
+            try {
+                dir = Dir.open(drm_dir(), 0);
+            } catch (FileError e) {
+                return best;
+            }
+            string? node;
+            while ((node = dir.read_name()) != null) {
+                if (!node.has_prefix("card") || node.contains("-")) {
+                    continue;
+                }
+                string? raw = read_first_line(
+                    drm_dir() + "/" + node + "/device/gpu_busy_percent");
+                if (raw == null) {
+                    continue;
+                }
+                double value = double.parse(raw) / 100.0;
+                if (value >= 0.0 && value > best) {
+                    best = value.clamp(0.0, 1.0);
+                }
+            }
+            return best;
+        }
+
+        private void collect_drm_clients(
+            Gee.HashMap<string, uint64?> counters,
+            Gee.HashMap<string, uint64?> capacities) {
+            var clients = new Gee.HashSet<string>();
+            Dir proc;
+            try {
+                proc = Dir.open(proc_dir(), 0);
+            } catch (FileError e) {
+                return;
+            }
+            string? pid;
+            while ((pid = proc.read_name()) != null) {
+                if (pid == "" || !pid[0].isdigit()) {
+                    continue;
+                }
+                string fdinfo_path = proc_dir() + "/" + pid + "/fdinfo";
+                Dir fdinfo;
+                try {
+                    fdinfo = Dir.open(fdinfo_path, 0);
+                } catch (FileError e) {
+                    continue;
+                }
+                string? fd;
+                while ((fd = fdinfo.read_name()) != null) {
+                    string contents;
+                    try {
+                        if (!FileUtils.get_contents(fdinfo_path + "/" + fd,
+                                                    out contents)) {
+                            continue;
+                        }
+                    } catch (FileError e) {
+                        continue;
+                    }
+
+                    string driver = "";
+                    string device = "";
+                    string client = "";
+                    var engines = new Gee.HashMap<string, uint64?>();
+                    var engine_capacities = new Gee.HashMap<string, uint64?>();
+                    foreach (string line in contents.split("\n")) {
+                        int separator = line.index_of(":");
+                        if (separator < 0) {
+                            continue;
+                        }
+                        string key = line.substring(0, separator).strip();
+                        string value = line.substring(separator + 1).strip();
+                        if (key == "drm-driver") {
+                            driver = value;
+                        } else if (key == "drm-pdev") {
+                            device = value;
+                        } else if (key == "drm-client-id") {
+                            client = value;
+                        } else if (key.has_prefix("drm-engine-capacity-")) {
+                            string engine = key.substring("drm-engine-capacity-".length);
+                            engine_capacities[engine] = uint64.parse(value);
+                        } else if (key.has_prefix("drm-engine-")) {
+                            string engine = key.substring("drm-engine-".length);
+                            string[] parts = value.split(" ");
+                            engines[engine] = uint64.parse(parts[0]);
+                        }
+                    }
+                    if (driver == "" || client == "" || engines.size == 0) {
+                        continue;
+                    }
+                    string client_key = "%s|%s|%s".printf(driver, device, client);
+                    if (clients.contains(client_key)) {
+                        continue;
+                    }
+                    clients.add(client_key);
+                    foreach (var entry in engines.entries) {
+                        counters[client_key + "|" + entry.key] = entry.value;
+                        string engine_key = device + "|" + entry.key;
+                        uint64 capacity = engine_capacities.has_key(entry.key)
+                            ? engine_capacities[entry.key] : 1;
+                        if (!capacities.has_key(engine_key)
+                            || capacity > capacities[engine_key]) {
+                            capacities[engine_key] = capacity;
+                        }
+                    }
+                }
+            }
+        }
+
+        internal void sample_gpu_utilization(int64 now_us) {
+            double best = collect_amd_gpu_utilization();
+            var counters = new Gee.HashMap<string, uint64?>();
+            var capacities = new Gee.HashMap<string, uint64?>();
+            collect_drm_clients(counters, capacities);
+
+            if (counters.size > 0) {
+                var deltas = new Gee.HashMap<string, uint64?>();
+                foreach (var entry in counters.entries) {
+                    if (!_drm_counters.has_key(entry.key)) {
+                        continue;
+                    }
+                    uint64 previous = _drm_counters[entry.key];
+                    if (entry.value < previous) {
+                        continue;
+                    }
+                    int engine_separator = entry.key.last_index_of("|");
+                    string client_key = entry.key.substring(0, engine_separator);
+                    int client_separator = client_key.last_index_of("|");
+                    string device_key = client_key.substring(0, client_separator);
+                    int device_separator = device_key.last_index_of("|");
+                    string device = device_key.substring(device_separator + 1);
+                    string engine = entry.key.substring(engine_separator + 1);
+                    string engine_key = device + "|" + engine;
+                    uint64 delta = entry.value - previous;
+                    deltas[engine_key] = (deltas.has_key(engine_key)
+                        ? deltas[engine_key] : 0) + delta;
+                }
+                int64 elapsed_us = now_us - _last_gpu_sample_us;
+                if (_last_gpu_sample_us > 0 && elapsed_us > 0) {
+                    foreach (var entry in deltas.entries) {
+                        uint64 capacity = capacities.has_key(entry.key)
+                            ? capacities[entry.key] : 1;
+                        double value = (double) entry.value
+                            / ((double) elapsed_us * 1000.0 * (double) capacity);
+                        if (value > best) {
+                            best = value.clamp(0.0, 1.0);
+                        }
+                    }
+                } else if (best < 0.0) {
+                    best = 0.0;
+                }
+            }
+            _drm_counters = counters;
+            _last_gpu_sample_us = now_us;
+            _base_gpu_utilization = best;
+            gpu_utilization = _base_gpu_utilization > _nvidia_gpu_utilization
+                ? _base_gpu_utilization : _nvidia_gpu_utilization;
+        }
+
 
         /**
          * True when this machine has an NVIDIA driver and nvidia-smi. Checked
@@ -980,12 +1150,15 @@ namespace Singularity {
             return _nvidia_present;
         }
 
-        private void parse_nvidia(string? csv) {
+        internal void parse_nvidia(string? csv) {
             SensorReading[] found = {};
             int power_milliwatts = -1;
+            double utilization = -1.0;
             if (csv == null) {
                 _nvidia_readings = found;
                 gpu_power_milliwatts = -1;
+                _nvidia_gpu_utilization = -1.0;
+                gpu_utilization = _base_gpu_utilization;
                 return;
             }
             foreach (string line in csv.split("\n")) {
@@ -998,6 +1171,12 @@ namespace Singularity {
                 }
                 string name = fields[0].strip();
                 int celsius = int.parse(fields[1].strip());
+                if (fields.length >= 5) {
+                    double value = double.parse(fields[4].strip()) / 100.0;
+                    if (value >= 0.0 && value > utilization) {
+                        utilization = value.clamp(0.0, 1.0);
+                    }
+                }
                 // The same ceiling as sysfs. nvidia-smi also reports the
                 // absolute die temperature on every generation here -- do NOT
                 // switch this query to temperature.gpu.tlimit, which on Ada is
@@ -1024,6 +1203,9 @@ namespace Singularity {
             }
             _nvidia_readings = found;
             gpu_power_milliwatts = power_milliwatts;
+            _nvidia_gpu_utilization = utilization;
+            gpu_utilization = _base_gpu_utilization > _nvidia_gpu_utilization
+                ? _base_gpu_utilization : _nvidia_gpu_utilization;
         }
 
         /**
@@ -1037,7 +1219,7 @@ namespace Singularity {
             }
             string[] argv = {
                 "nvidia-smi",
-                "--query-gpu=name,temperature.gpu,clocks.sm,power.draw",
+                "--query-gpu=name,temperature.gpu,clocks.sm,power.draw,utilization.gpu",
                 "--format=csv,noheader,nounits"
             };
             try {
@@ -1246,6 +1428,7 @@ namespace Singularity {
 
             _fans = collect_fans();
             _power = collect_power();
+            sample_gpu_utilization(GLib.get_monotonic_time());
 
             ClockReading[] clocks = collect_clocks();
             // Highest first, so a caller can take element 0 as "the" clock.
@@ -1313,6 +1496,8 @@ namespace Singularity {
 
             cpu_millidegrees = hottest_cpu;
             gpu_millidegrees = hottest_gpu;
+            gpu_utilization = _base_gpu_utilization > _nvidia_gpu_utilization
+                ? _base_gpu_utilization : _nvidia_gpu_utilization;
             system_millidegrees = hottest_system;
             cpu_khz = _clocks_khz.length > 0 ? _clocks_khz[0] : -1;
             // Any readable category counts. A VM or a restricted-hwmon setup
@@ -1321,7 +1506,8 @@ namespace Singularity {
             available = found.length > 0
                 || _clocks_khz.length > 0
                 || _fans.length > 0
-                || _power.length > 0;
+                || _power.length > 0
+                || gpu_utilization >= 0.0;
 
             updated();
         }
