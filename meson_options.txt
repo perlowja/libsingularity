@@ -1,2 +1,3 @@
 option('introspection', type: 'boolean', value: true, description: 'Enable GObject Introspection')
+option('layer-shell', type: 'boolean', value: true, description: 'Build widgets that require gtk4-layer-shell')
 option('system', type: 'boolean', value: true, description: 'Build libsingularity-system (headless system backends: bluetooth, audio, power, network, datetime, locale, accounts). Disable for standalone apps that only need the UI toolkit.')

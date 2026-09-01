@@ -16,7 +16,6 @@ girdir = join_paths(datadir, 'gir-1.0')
 typelibdir = join_paths(libdir, 'girepository-1.0')
 
 gtk4_dep       = dependency('gtk4',               version: '>= 4.6')
-layershell_dep = dependency('gtk4-layer-shell-0', version: '>= 0.7')
 wayland_dep    = dependency('wayland-client')
 gee_dep        = dependency('gee-0.8',            version: '>= 0.20')
 json_dep       = dependency('json-glib-1.0',      version: '>= 1.6')
@@ -29,7 +28,14 @@ introspection_dep = dependency('gobject-introspection-1.0', required: get_option
 cc = meson.get_compiler('c')
 m_dep = cc.find_library('m', required: false)
 
-libsingularity_deps = [gtk4_dep, layershell_dep, wayland_dep, gee_dep, json_dep, peas_dep, gmodule_dep, soup_dep, gtksource_dep, m_dep]
+libsingularity_deps = [gtk4_dep, wayland_dep, gee_dep, json_dep, peas_dep, gmodule_dep, soup_dep, gtksource_dep, m_dep]
+libsingularity_requires = ['gtk4', 'gee-0.8', 'json-glib-1.0', 'libpeas-2', 'gtksourceview-5']
+
+if get_option('layer-shell')
+  layershell_dep = dependency('gtk4-layer-shell-0', version: '>= 0.7')
+  libsingularity_deps += [layershell_dep]
+  libsingularity_requires += ['gtk4-layer-shell-0']
+endif
 
 wayland_scanner = find_program('wayland-scanner')
 effect_protocol_xml = 'protocols/singularity-blur-unstable-v1.xml'
@@ -81,12 +87,9 @@ libsingularity_sources = files(
   'src/ui/navigation/menu_row.vala',
   'src/ui/navigation/context_menu.vala',
   'src/ui/navigation/app_sidebar.vala',
-  'src/shell/shell_dialog.vala',
   'src/ui/navigation/sidebar_section_label.vala',
   'src/shell/global_menu_bar.vala',
   'src/ui/pages/welcome_page.vala',
-  'src/shell/osd_overlay.vala',
-  'src/shell/screen_flash.vala',
   'src/ui/controls/quick_setting_tile.vala',
   'src/ui/controls/search_entry.vala',
   'src/ui/visual/hover_controls.vala',
@@ -141,6 +144,14 @@ libsingularity_sources = files(
   'src/file_system/samba_provider.vala',
 )
 
+if get_option('layer-shell')
+  libsingularity_sources += files(
+    'src/shell/shell_dialog.vala',
+    'src/shell/osd_overlay.vala',
+    'src/shell/screen_flash.vala',
+  )
+endif
+
 libsingularity = shared_library('singularity',
   libsingularity_sources + libsingularity_resources + [
     'src/wayland/surface_effect.c',
@@ -186,7 +197,7 @@ pkgconfig.generate(
   description: 'Singularity Desktop application framework library',
   version: meson.project_version(),
   filebase: 'singularity-1.0',
-  requires: ['gtk4', 'gtk4-layer-shell-0', 'gee-0.8', 'json-glib-1.0', 'libpeas-2', 'gtksourceview-5'],
+  requires: libsingularity_requires,
 )
 
 install_data(
