@@ -158,6 +158,16 @@ namespace Singularity.Core {
                 }
             ));
             themes.add(new Singularity.Widgets.ColorTheme(
+                "solarized-light",
+                "Solarized Light",
+                "#fdf6e3",
+                "#657b83",
+                {
+                    "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+                    "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3"
+                }
+            ));
+            themes.add(new Singularity.Widgets.ColorTheme(
                 "monokai",
                 "Monokai Pro",
                 "#2d2a2e",
@@ -178,6 +188,16 @@ namespace Singularity.Core {
                 }
             ));
             themes.add(new Singularity.Widgets.ColorTheme(
+                "gruvbox-light",
+                "Gruvbox Light",
+                "#fbf1c7",
+                "#3c3836",
+                {
+                    "#fbf1c7", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#7c6f64",
+                    "#928374", "#9d0006", "#79740e", "#b57614", "#076678", "#8f3f71", "#427b58", "#3c3836"
+                }
+            ));
+            themes.add(new Singularity.Widgets.ColorTheme(
                 "tokyo-night",
                 "Tokyo Night",
                 "#1a1b26",
@@ -195,6 +215,26 @@ namespace Singularity.Core {
                 {
                     "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
                     "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8"
+                }
+            ));
+            themes.add(new Singularity.Widgets.ColorTheme(
+                "catppuccin-latte",
+                "Catppuccin Latte",
+                "#eff1f5",
+                "#4c4f69",
+                {
+                    "#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+                    "#6c6f85", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#bcc0cc"
+                }
+            ));
+            themes.add(new Singularity.Widgets.ColorTheme(
+                "github-light",
+                "GitHub Light",
+                "#ffffff",
+                "#24292f",
+                {
+                    "#24292f", "#cf222e", "#116329", "#4d2d00", "#0969da", "#8250df", "#1b7c83", "#6e7781",
+                    "#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9", "#3192aa", "#8c959f"
                 }
             ));
             return themes;
