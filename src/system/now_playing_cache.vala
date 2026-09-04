@@ -3,11 +3,6 @@ using GLib;
 namespace Singularity {
 
     public class NowPlayingCache : Object {
-        [DBus (name = "org.freedesktop.DBus")]
-        private interface DBusNames : Object {
-            public abstract string[] ListNames () throws GLib.Error;
-        }
-
         private static NowPlayingCache? _instance = null;
         public static NowPlayingCache get_default() {
             if (_instance == null) _instance = new NowPlayingCache();
@@ -15,9 +10,9 @@ namespace Singularity {
         }
 
         private DBusConnection? connection = null;
-        private GLib.DBusProxy? player_proxy = null;
         private string? current_player_name = null;
         private uint _name_watch_id = 0;
+        private uint _properties_watch_id = 0;
         private string? _last_art_url = null;
         private string _cache_path;
         private string _cache_dir;
@@ -50,61 +45,95 @@ namespace Singularity {
                     if (new_owner != null && new_owner != "") {
                         connect_to_player(name);
                     } else if (name == current_player_name) {
+                        disconnect_player();
                         current_player_name = null;
-                        player_proxy = null;
                         clear_cache();
-                        find_player();
+                        find_player.begin();
                     }
                 });
 
-            find_player();
+            find_player.begin();
         }
 
-        private void find_player() {
+        private async void find_player() {
+            var bus = connection;
+            if (bus == null) return;
             try {
-                var dbus = Bus.get_proxy_sync<DBusNames>(
-                    BusType.SESSION, "org.freedesktop.DBus", "/org/freedesktop/DBus");
-                string[] names = dbus.ListNames();
+                var result = yield bus.call(
+                    "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus", "ListNames", null,
+                    new VariantType("(as)"), DBusCallFlags.NONE, 1000, null);
+                VariantIter iter;
+                result.get("(as)", out iter);
                 string? best_name = null;
-                foreach (string name in names) {
+                string? name;
+                while (iter.next("s", out name)) {
+                    if (name == null) continue;
                     if (!name.has_prefix("org.mpris.MediaPlayer2.")) continue;
                     if (best_name == null) best_name = name;
-                    try {
-                        var p = new GLib.DBusProxy.for_bus_sync(
-                            BusType.SESSION, DBusProxyFlags.NONE, null,
-                            name, "/org/mpris/MediaPlayer2",
-                            "org.mpris.MediaPlayer2.Player", null);
-                        var st = p.get_cached_property("PlaybackStatus");
-                        if (st != null && st.get_string() == "Playing") {
-                            best_name = name;
-                            break;
-                        }
-                    } catch (Error e) { continue; }
+                    if (yield player_is_playing(name)) {
+                        best_name = name;
+                        break;
+                    }
                 }
                 if (best_name != null) connect_to_player(best_name);
             } catch (Error e) { }
         }
 
-        private void connect_to_player(string name) {
+        private async bool player_is_playing(string name) {
+            var bus = connection;
+            if (bus == null) return false;
             try {
-                var proxy = new GLib.DBusProxy.for_bus_sync(
-                    BusType.SESSION, DBusProxyFlags.NONE, null,
-                    name, "/org/mpris/MediaPlayer2",
-                    "org.mpris.MediaPlayer2.Player", null);
-                player_proxy = proxy;
-                current_player_name = name;
-                _last_art_url = null;
-                proxy.g_properties_changed.connect(() => update_art());
-                update_art();
+                var result = yield bus.call(name, "/org/mpris/MediaPlayer2",
+                    "org.freedesktop.DBus.Properties", "Get",
+                    new Variant("(ss)", "org.mpris.MediaPlayer2.Player",
+                        "PlaybackStatus"),
+                    new VariantType("(v)"), DBusCallFlags.NONE, 500, null);
+                return result.get_child_value(0).get_variant().get_string()
+                    == "Playing";
             } catch (Error e) {
-                warning("NowPlayingCache: connect to %s failed: %s", name, e.message);
+                return false;
             }
         }
 
-        private void update_art() {
-            if (player_proxy == null) return;
-            var metadata = player_proxy.get_cached_property("Metadata");
-            if (metadata == null) return;
+        private void connect_to_player(string name) {
+            var bus = connection;
+            if (bus == null || name == current_player_name) return;
+            disconnect_player();
+            current_player_name = name;
+            _last_art_url = null;
+            _properties_watch_id = bus.signal_subscribe(name,
+                "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player",
+                DBusSignalFlags.NONE,
+                (conn, sender, path, iface, sig, parameters) => {
+                    refresh_art.begin(name);
+                });
+            refresh_art.begin(name);
+        }
+
+        private void disconnect_player() {
+            if (_properties_watch_id != 0 && connection != null) {
+                connection.signal_unsubscribe(_properties_watch_id);
+                _properties_watch_id = 0;
+            }
+        }
+
+        private async void refresh_art(string name) {
+            var bus = connection;
+            if (bus == null || name != current_player_name) return;
+            try {
+                var result = yield bus.call(name, "/org/mpris/MediaPlayer2",
+                    "org.freedesktop.DBus.Properties", "Get",
+                    new Variant("(ss)", "org.mpris.MediaPlayer2.Player",
+                        "Metadata"),
+                    new VariantType("(v)"), DBusCallFlags.NONE, 1000, null);
+                if (name != current_player_name) return;
+                update_art(result.get_child_value(0).get_variant());
+            } catch (Error e) { }
+        }
+
+        private void update_art(Variant metadata) {
             string art_url = "";
             var art_v = metadata.lookup_value("mpris:artUrl", null);
             if (art_v != null && art_v.is_of_type(VariantType.STRING))
