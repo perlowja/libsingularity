@@ -940,6 +940,21 @@ namespace Singularity.Widgets {
             if (expanded) populate_list();
         }
 
+        /**
+         * Replaces the current option list with id/label pairs and rebuilds
+         * the inner list box -- the with_options() equivalent of set_items(),
+         * for a row whose option list is only known after an async load
+         * (set_items()'s current-value domain is the label itself, which
+         * breaks the moment an option's id and display label differ).
+         *
+         * @param new_options New id/label option list.
+         */
+        public void set_options(Gee.ArrayList<Singularity.Core.AppSettingOption> new_options) {
+            options = new_options;
+            items = new GLib.List<string>();
+            if (expanded) populate_list();
+        }
+
         private void populate_list() {
             filter_list(search_entry);
         }
