@@ -5386,3 +5386,44 @@ button.disk-card.selected {
     outline: 2px solid @accent_color;
     outline-offset: 2px;
 }
+
+/* Wallpaper attribution overlay (Background.vala).
+ *
+ * Sits in the bottom-left corner of the live desktop background as a
+ * single Gtk.Label over the wallpaper cross-fade. The scrim is a
+ * semi-transparent rounded rectangle so the text reads against both
+ * bright and dark wallpapers without an aggressive box, and the
+ * light-bg / non-light-bg pair matches the convention panel.vala
+ * already uses for the top band -- same colour tokens, same
+ * threshold (topbar_lum_threshold = 0.72, defined in panel.vala).
+ *
+ * The scrim's @scrim_color is the same token panel.vala uses for
+ * its own transparent-mode scrim; reusing it keeps the wallpapers
+ * scrim and the panel scrim visually consistent so a user moving
+ * their eye between top and bottom corners sees the same opacity
+ * curve.
+ */
+.background-window .attribution-label {
+    /* Scrim uses alpha(@text_color, ...) so it adapts to the active
+     * theme: dark in light mode, light in dark mode. The 0.55 alpha
+     * keeps the wallpaper pixels underneath visible while giving the
+     * text a stable background to read against. */
+    background-color: alpha(@text_color, 0.55);
+    border-radius: 8px;
+    padding: 6px 12px;
+    color: @text_color;
+    font-size: 13px;
+    font-weight: 400;
+    text-shadow: 0 1px 2px alpha(@shadow_color, 0.45);
+}
+.background-window.light-bg .attribution-label {
+    /* Wallpaper sampled as bright (luminance > topbar_lum_threshold).
+     * Soften the shadow so it doesn't muddy the contrast against the
+     * already-bright wallpaper; the scrim does the heavy lifting. */
+    text-shadow: 0 1px 2px alpha(@shadow_color, 0.18);
+}
+.background-window:not(.light-bg) .attribution-label {
+    /* Default (dark wallpaper). Stronger shadow to give the light
+     * text enough definition against varied pixel colours. */
+    text-shadow: 0 1px 3px alpha(@shadow_color, 0.7);
+}
