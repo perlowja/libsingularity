@@ -16,6 +16,7 @@ girdir = join_paths(datadir, 'gir-1.0')
 typelibdir = join_paths(libdir, 'girepository-1.0')
 
 gtk4_dep       = dependency('gtk4',               version: '>= 4.6')
+adwaita_dep    = dependency('libadwaita-1',        version: '>= 1.2')
 wayland_dep    = dependency('wayland-client')
 gee_dep        = dependency('gee-0.8',            version: '>= 0.20')
 json_dep       = dependency('json-glib-1.0',      version: '>= 1.6')
@@ -28,8 +29,8 @@ introspection_dep = dependency('gobject-introspection-1.0', required: get_option
 cc = meson.get_compiler('c')
 m_dep = cc.find_library('m', required: false)
 
-libsingularity_deps = [gtk4_dep, wayland_dep, gee_dep, json_dep, peas_dep, gmodule_dep, soup_dep, gtksource_dep, m_dep]
-libsingularity_requires = ['gtk4', 'gee-0.8', 'json-glib-1.0', 'libpeas-2', 'gtksourceview-5']
+libsingularity_deps = [gtk4_dep, adwaita_dep, wayland_dep, gee_dep, json_dep, peas_dep, gmodule_dep, soup_dep, gtksource_dep, m_dep]
+libsingularity_requires = ['gtk4', 'libadwaita-1', 'gee-0.8', 'json-glib-1.0', 'libpeas-2', 'gtksourceview-5']
 
 if get_option('layer-shell')
   layershell_dep = dependency('gtk4-layer-shell-0', version: '>= 0.7')

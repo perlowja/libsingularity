@@ -17,11 +17,19 @@ namespace Singularity.Style {
     public class StyleManager : Object {
 
         private static StyleManager? _instance;
+        private static bool adwaita_initialized = false;
+
+        private static void ensure_adwaita_initialized() {
+            if (adwaita_initialized) return;
+            Adw.init();
+            adwaita_initialized = true;
+        }
 
         /**
          * GTK theme name pinned for all first-party Singularity surfaces. It is
          * an empty CSS theme so the theme layer contributes nothing and styling
-         * comes solely from libsingularity's style.css (PRIORITY_USER). This is
+         * comes from libsingularity's style.css (PRIORITY_USER), over the native
+         * libadwaita widget stylesheet. This is
          * deliberately NOT the full "Singularity" theme, which is for
          * third-party GTK apps; our surfaces must never inherit that base.
          */
@@ -49,7 +57,8 @@ namespace Singularity.Style {
          * them pinned via notify guards.
          *
          * The pinned "SingularityShell" GTK theme ships empty CSS so GTK loads
-         * nothing from the theme layer, letting our embedded style.css win. (The
+         * no GTK theme CSS; libadwaita supplies native widget styling and our
+         * embedded style.css continues to take priority. (The
          * full "Singularity" GTK theme, built from our tokens, is for third-party
          * apps only.) The "Singularity" icon theme is an empty seam inheriting
          * Adwaita. The notify guards stop the
@@ -63,6 +72,9 @@ namespace Singularity.Style {
         public static void pin_brand_themes() {
             var gs = Gtk.Settings.get_default();
             if (gs == null) return;
+            // Install native Adw styling before pinning the brand GTK theme.
+            // Both Application and ShellApplication enter through this helper.
+            ensure_adwaita_initialized();
             gs.gtk_theme_name = BRAND_GTK_THEME;
             gs.notify["gtk-theme-name"].connect(() => {
                 if (gs.gtk_theme_name != BRAND_GTK_THEME) {
@@ -101,6 +113,7 @@ namespace Singularity.Style {
          * apply_color_scheme() afterwards to switch to light.
          */
         public void load_theme() {
+            sync_adwaita_color_scheme();
             if (accent_provider != null) return;
             apply_accent_color("blue");
             setup_material_style();
@@ -610,9 +623,16 @@ namespace Singularity.Style {
          */
         public void apply_color_scheme(bool dark) {
             current_dark_mode = dark;
+            sync_adwaita_color_scheme();
             apply_accent_color(current_accent, current_accent_wallpaper);
             update_material_style();
             _load_user_theme_variant(dark);
+        }
+
+        private void sync_adwaita_color_scheme() {
+            ensure_adwaita_initialized();
+            Adw.StyleManager.get_default().color_scheme = current_dark_mode
+                ? Adw.ColorScheme.FORCE_DARK : Adw.ColorScheme.FORCE_LIGHT;
         }
 
         private CssProvider? high_contrast_provider;
