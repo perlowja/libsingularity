@@ -5397,33 +5397,25 @@ button.disk-card.selected {
  * already uses for the top band -- same colour tokens, same
  * threshold (topbar_lum_threshold = 0.72, defined in panel.vala).
  *
- * The scrim's @scrim_color is the same token panel.vala uses for
- * its own transparent-mode scrim; reusing it keeps the wallpapers
- * scrim and the panel scrim visually consistent so a user moving
- * their eye between top and bottom corners sees the same opacity
- * curve.
+ * The luminance class selects an opposing scrim/text pair independently
+ * of the active application theme, since wallpaper contrast cannot be
+ * inferred from the theme's text colour.
  */
 .background-window .attribution-label {
-    /* Scrim uses alpha(@text_color, ...) so it adapts to the active
-     * theme: dark in light mode, light in dark mode. The 0.55 alpha
-     * keeps the wallpaper pixels underneath visible while giving the
-     * text a stable background to read against. */
-    background-color: alpha(@text_color, 0.55);
     border-radius: 8px;
     padding: 6px 12px;
-    color: @text_color;
     font-size: 13px;
     font-weight: 400;
-    text-shadow: 0 1px 2px alpha(@shadow_color, 0.45);
 }
 .background-window.light-bg .attribution-label {
-    /* Wallpaper sampled as bright (luminance > topbar_lum_threshold).
-     * Soften the shadow so it doesn't muddy the contrast against the
-     * already-bright wallpaper; the scrim does the heavy lifting. */
-    text-shadow: 0 1px 2px alpha(@shadow_color, 0.18);
+    /* Bright wallpaper: dark scrim with light foreground. */
+    background-color: alpha(black, 0.65);
+    color: white;
+    text-shadow: 0 1px 2px alpha(black, 0.45);
 }
 .background-window:not(.light-bg) .attribution-label {
-    /* Default (dark wallpaper). Stronger shadow to give the light
-     * text enough definition against varied pixel colours. */
-    text-shadow: 0 1px 3px alpha(@shadow_color, 0.7);
+    /* Dark wallpaper: light scrim with dark foreground. */
+    background-color: alpha(white, 0.72);
+    color: black;
+    text-shadow: 0 1px 2px alpha(white, 0.35);
 }
