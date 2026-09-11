@@ -5408,14 +5408,23 @@ button.disk-card.selected {
     font-weight: 400;
 }
 .background-window.light-bg .attribution-label {
-    /* Bright wallpaper: dark scrim with light foreground. */
-    background-color: alpha(black, 0.65);
+    /* Bright wallpaper: dark scrim with light foreground. Scrim bumped
+     * from 0.65 -> 0.80 and the text gains a layered black halo because
+     * average-corner-luminance sampling (Background.vala's
+     * corner_luminance_frac) picks one of two opposing pairs and cannot
+     * account for local texture / color busyness within the sampled
+     * corner -- the layered text-shadow does, per-glyph, and is what
+     * actually carries the legibility against a busy photo (a colorful
+     * beach/ocean scene was the reported failure case). */
+    background-color: alpha(black, 0.80);
     color: white;
-    text-shadow: 0 1px 2px alpha(black, 0.45);
+    text-shadow: 0 0 2px alpha(black, 0.9), 0 0 4px alpha(black, 0.6), 0 1px 2px alpha(black, 0.45);
 }
 .background-window:not(.light-bg) .attribution-label {
-    /* Dark wallpaper: light scrim with dark foreground. */
-    background-color: alpha(white, 0.72);
+    /* Dark wallpaper: light scrim with dark foreground. Same layered
+     * halo approach as .light-bg, just with a white halo around the
+     * black glyphs. Scrim bumped 0.72 -> 0.85. */
+    background-color: alpha(white, 0.85);
     color: black;
-    text-shadow: 0 1px 2px alpha(white, 0.35);
+    text-shadow: 0 0 2px alpha(white, 0.9), 0 0 4px alpha(white, 0.6), 0 1px 2px alpha(white, 0.35);
 }
