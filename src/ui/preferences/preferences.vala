@@ -792,6 +792,7 @@ namespace Singularity.Widgets {
         /** Emitted with the chosen item string when the user makes a selection. */
         public signal void selected(string item);
         private Singularity.Widgets.SearchEntry search_entry;
+        private Box selection_container;
         private ListBox list_box;
         private Label value_label;
         private GLib.List<string> items;
@@ -894,19 +895,9 @@ namespace Singularity.Widgets {
 
         private void init_ui() {
             var container = new Box(Orientation.VERTICAL, 0);
+            selection_container = container;
             int count = (options != null) ? options.size : (int)items.length();
-            if (count > 5) {
-                var se_wrap = new Box(Orientation.VERTICAL, 0);
-                se_wrap.margin_top = 8;
-                se_wrap.margin_bottom = 4;
-                se_wrap.margin_start = 12;
-                se_wrap.margin_end = 12;
-                search_entry = new Singularity.Widgets.SearchEntry();
-                search_entry.placeholder_text = _("Search...");
-                search_entry.search_changed.connect(() => filter_list(search_entry));
-                se_wrap.append(search_entry);
-                container.append(se_wrap);
-            }
+            if (count > 5) ensure_search_entry();
             var scrolled = new ScrolledWindow();
             scrolled.min_content_height = 200;
             scrolled.max_content_height = 320;
@@ -924,6 +915,20 @@ namespace Singularity.Widgets {
                     populate_list();
                 }
             });
+        }
+
+        private void ensure_search_entry() {
+            if (search_entry != null) return;
+            var se_wrap = new Box(Orientation.VERTICAL, 0);
+            se_wrap.margin_top = 8;
+            se_wrap.margin_bottom = 4;
+            se_wrap.margin_start = 12;
+            se_wrap.margin_end = 12;
+            search_entry = new Singularity.Widgets.SearchEntry();
+            search_entry.placeholder_text = _("Search...");
+            search_entry.search_changed.connect(() => filter_list(search_entry));
+            se_wrap.append(search_entry);
+            selection_container.prepend(se_wrap);
         }
 
         /**
@@ -952,6 +957,8 @@ namespace Singularity.Widgets {
         public void set_options(Gee.ArrayList<Singularity.Core.AppSettingOption> new_options) {
             options = new_options;
             items = new GLib.List<string>();
+            current_value = _current_value;
+            if (options.size > 5) ensure_search_entry();
             if (expanded) populate_list();
         }
 
