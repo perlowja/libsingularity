@@ -531,12 +531,34 @@ notebook > header > tabs > tab:hover:not(:checked) { background-color: @card_hov
 /* ...but NOT inside popovers/menus opened from the panel: those are
    descendants of the panel button in the GTK4 widget tree, so the panel
    color rules above bleed onto their own (theme-coloured) body. Reset them
-   to the theme foreground in every panel state so popups stay readable. */
+   to the theme foreground in every panel state so popups stay readable.
+   MUST match (or exceed) the light-bg bleed-through rule's specificity
+   (.panel-window.light-bg:not(.flat-panel) .panel *, three classes) or it
+   silently loses the cascade and the popover gets dark-on-dark text on a
+   bright wallpaper -- confirmed live 2026-09-13: the bare .panel-window
+   variant below never actually overrode .light-bg's #1a1a1a, so every
+   popover opened while light-bg was active rendered near-unreadable. */
 .panel-window .panel popover,
 .panel-window .panel popover *,
+.panel-window.light-bg .panel popover,
+.panel-window.light-bg .panel popover *,
+.panel-window.light-bg:not(.flat-panel) .panel popover,
+.panel-window.light-bg:not(.flat-panel) .panel popover *,
 .panel-window.flat-panel .panel popover,
 .panel-window.flat-panel .panel popover * {
     color: @text_color;
+}
+
+/* Bordered frame around each sensor resource-pool section (CPU/GPU/VPU/
+   Storage/etc). Multiple sections can land in the same column (balanced by
+   row count, not by which resource they are), and with no boundary between
+   them a section like GPU stacked directly above VPU reads as one resource
+   -- operator feedback, 2026-09-13 live review. */
+.sensors-resource-section {
+    border: 1px solid alpha(@text_color, 0.12);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 4px;
 }
 
 /* Active state always gets white text on accent bg regardless of mode. */
