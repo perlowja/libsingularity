@@ -246,6 +246,7 @@ if get_option('system')
     'src/system/hardware_info.vala',
     'src/system/sensor.vala',
     'src/system/utilization.vala',
+    'src/system/fan_control_manager.vala',
   )
 
   libsingularity_system = shared_library('singularity-system',

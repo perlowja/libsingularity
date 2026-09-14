@@ -699,8 +699,90 @@ private void test_nvidia_utilization_csv() {
     assert(m.gpu_power_milliwatts == 125400);
 }
 
+private void hwmon_value(string chip_dir, string name, string value) {
+    write_file(Path.build_filename(chip_dir, name), value + "\n");
+}
+
+private void test_idle_laptop_fan_is_a_channel() {
+    reset_fixture();
+    string tp = hwmon_chip(0, "thinkpad");
+    hwmon_value(tp, "fan1_input", "0");
+    hwmon_value(tp, "fan2_input", "0");
+    hwmon_value(tp, "pwm1", "128");
+    hwmon_value(tp, "pwm1_enable", "2");
+
+    var m = monitor_for_fixture();
+    assert(m.fans().length == 0);
+    var channels = m.fan_channels();
+    assert(channels.length == 2);
+    foreach (var fan in channels) {
+        assert(fan.pwm_channel == 1);
+        assert(fan.pwm == 128);
+        assert(fan.mode == Singularity.FanMode.AUTOMATIC);
+    }
+}
+
+private void test_empty_desktop_header_is_not_a_channel() {
+    reset_fixture();
+    string nct = hwmon_chip(0, "nct6798");
+    hwmon_value(nct, "fan1_input", "1100");
+    hwmon_value(nct, "fan2_input", "0");
+    hwmon_value(nct, "pwm1", "102");
+    hwmon_value(nct, "pwm1_enable", "1");
+    hwmon_value(nct, "pwm2", "0");
+    hwmon_value(nct, "pwm2_enable", "5");
+
+    var m = monitor_for_fixture();
+    var channels = m.fan_channels();
+    assert(channels.length == 1);
+    assert(channels[0].channel == 1);
+    assert(channels[0].mode == Singularity.FanMode.MANUAL);
+    assert(Math.fabs(channels[0].pwm_fraction - 0.4) < 0.001);
+}
+
+private void test_fan_reads_chip_curve() {
+    reset_fixture();
+    string nct = hwmon_chip(0, "nct6798");
+    hwmon_value(nct, "fan1_input", "900");
+    hwmon_value(nct, "pwm1", "80");
+    hwmon_value(nct, "pwm1_enable", "5");
+    int[] temps = { 30000, 50000, 70000, 90000 };
+    int[] pwms = { 60, 100, 180, 255 };
+    for (int i = 0; i < temps.length; i++) {
+        hwmon_value(nct, "pwm1_auto_point%d_temp".printf(i + 1), temps[i].to_string());
+        hwmon_value(nct, "pwm1_auto_point%d_pwm".printf(i + 1), pwms[i].to_string());
+    }
+
+    var m = monitor_for_fixture();
+    int[] read_temps;
+    int[] read_pwms;
+    m.fan_channels()[0].read_auto_points(out read_temps, out read_pwms);
+    assert(read_temps.length == 4);
+    assert(read_temps[2] == 70000);
+    assert(read_pwms[3] == 255);
+}
+
+private void test_fan_without_pwm_has_no_control() {
+    reset_fixture();
+    string fan = hwmon_chip(0, "f75308");
+    hwmon_value(fan, "fan1_input", "1342");
+    hwmon_value(fan, "fan2_input", "1046");
+    hwmon_value(fan, "pwm1", "90");
+    hwmon_value(fan, "pwm2", "90");
+
+    var m = monitor_for_fixture();
+    var channels = m.fan_channels();
+    assert(channels.length == 2);
+    assert(channels[1].pwm_channel == 2);
+    assert(channels[1].mode == Singularity.FanMode.UNKNOWN);
+}
+
 public int main(string[] args) {
     Test.init(ref args);
+    Test.add_func("/sensor/fan-idle-laptop-channel", test_idle_laptop_fan_is_a_channel);
+    Test.add_func("/sensor/fan-empty-header-hidden", test_empty_desktop_header_is_not_a_channel);
+    Test.add_func("/sensor/fan-chip-curve", test_fan_reads_chip_curve);
+    Test.add_func("/sensor/fan-without-enable", test_fan_without_pwm_has_no_control);
     Test.add_func("/sensor/unknown-never-cpu", test_unknown_sensors_are_never_cpu);
     Test.add_func("/sensor/no-cpu-is-minus-one", test_no_cpu_sensor_reports_minus_one);
     Test.add_func("/sensor/thermal-when-hwmon-nonempty", test_thermal_read_even_when_hwmon_nonempty);

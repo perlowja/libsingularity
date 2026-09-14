@@ -216,14 +216,73 @@ namespace Singularity {
         }
     }
 
+    public enum FanMode {
+        UNKNOWN,
+        FULL_SPEED,
+        MANUAL,
+        AUTOMATIC
+    }
+
     /** One fan, as reported by hwmon. */
     public class FanReading : Object {
         public string label { get; private set; }
         public int rpm { get; private set; }
+        public string chip { get; private set; default = ""; }
+        public string hwmon_path { get; private set; default = ""; }
+        public int channel { get; private set; default = 0; }
+        public int pwm_channel { get; private set; default = 0; }
+        public int pwm { get; private set; default = -1; }
+        public int pwm_enable { get; private set; default = -1; }
+
+        public FanMode mode {
+            get {
+                if (pwm_enable < 0) return FanMode.UNKNOWN;
+                if (pwm_enable == 0) return FanMode.FULL_SPEED;
+                if (pwm_enable == 1) return FanMode.MANUAL;
+                return FanMode.AUTOMATIC;
+            }
+        }
+
+        public double pwm_fraction {
+            get { return pwm < 0 ? -1.0 : ((double) pwm / 255.0).clamp(0.0, 1.0); }
+        }
 
         public FanReading(string label, int rpm) {
             this.label = label;
             this.rpm = rpm;
+        }
+
+        public FanReading.with_control(string label, int rpm, string chip,
+                                       string hwmon_path, int channel,
+                                       int pwm_channel, int pwm, int pwm_enable) {
+            this.label = label;
+            this.rpm = rpm;
+            this.chip = chip;
+            this.hwmon_path = hwmon_path;
+            this.channel = channel;
+            this.pwm_channel = pwm_channel;
+            this.pwm = pwm;
+            this.pwm_enable = pwm_enable;
+        }
+
+        public void read_auto_points(out int[] temps, out int[] pwms) {
+            int[] found_temps = {};
+            int[] found_pwms = {};
+            for (int point = 1; point <= 16 && hwmon_path != "" && pwm_channel > 0; point++) {
+                string stem = "%s/pwm%d_auto_point%d".printf(hwmon_path, pwm_channel, point);
+                string temp_raw = "";
+                string pwm_raw = "";
+                try {
+                    FileUtils.get_contents(stem + "_temp", out temp_raw);
+                    FileUtils.get_contents(stem + "_pwm", out pwm_raw);
+                } catch (FileError e) {
+                    break;
+                }
+                found_temps += int.parse(temp_raw.strip());
+                found_pwms += int.parse(pwm_raw.strip());
+            }
+            temps = found_temps;
+            pwms = found_pwms;
         }
     }
 
@@ -480,6 +539,8 @@ namespace Singularity {
             "gpu"
         };
 
+        private const string[] IDLE_FAN_CHIPS = { "thinkpad", "dell_smm", "applesmc" };
+
         private uint _timer_id = 0;
         private int _interval_sec = DEFAULT_INTERVAL_SEC;
         private SensorReading[] _readings = {};
@@ -521,6 +582,8 @@ namespace Singularity {
          */
         public string cpu_hint { get; set; default = ""; }
         public string gpu_hint { get; set; default = ""; }
+
+        public bool gpu_sampling { get; set; default = true; }
 
         public signal void updated();
 
@@ -582,7 +645,19 @@ namespace Singularity {
          * are indistinguishable through this interface.
          */
         public FanReading[] fans() {
-            return _fans;
+            FanReading[] spinning = {};
+            foreach (FanReading fan in _fans) {
+                if (fan.rpm > 0) spinning += fan;
+            }
+            return spinning;
+        }
+
+        public FanReading[] fan_channels() {
+            FanReading[] found = {};
+            foreach (FanReading fan in _fans) {
+                if (fan.rpm > 0 || matches_any(fan.chip, IDLE_FAN_CHIPS)) found += fan;
+            }
+            return found;
         }
 
         /**
@@ -757,6 +832,13 @@ namespace Singularity {
             return found;
         }
 
+        private int read_int(string path, int fallback) {
+            string? raw = read_first_line(path);
+            if (raw == null || raw == "") return fallback;
+            int64 value;
+            return int64.try_parse(raw, out value) ? (int) value : fallback;
+        }
+
         private FanReading[] collect_fans() {
             FanReading[] found = {};
             Dir dir;
@@ -785,15 +867,26 @@ namespace Singularity {
                         continue;
                     }
                     int rpm = int.parse(raw);
-                    if (rpm <= 0) {
+                    if (rpm < 0) {
                         continue;
                     }
                     string stem = entry.substring(0, entry.length - "_input".length);
+                    int channel = int.parse(stem.substring("fan".length));
                     string? label = read_first_line(base_path + "/" + stem + "_label");
                     string name = (label != null && label != "")
                         ? "%s %s".printf(chip, label)
                         : "%s %s".printf(chip, stem);
-                    found += new FanReading(name, rpm);
+                    int pwm_channel = channel;
+                    if (!FileUtils.test("%s/pwm%d".printf(base_path, channel), FileTest.EXISTS)) {
+                        pwm_channel = FileUtils.test(base_path + "/pwm1", FileTest.EXISTS)
+                            && !FileUtils.test(base_path + "/pwm2", FileTest.EXISTS) ? 1 : 0;
+                    }
+                    int pwm = pwm_channel > 0
+                        ? read_int("%s/pwm%d".printf(base_path, pwm_channel), -1) : -1;
+                    int pwm_enable = pwm_channel > 0
+                        ? read_int("%s/pwm%d_enable".printf(base_path, pwm_channel), -1) : -1;
+                    found += new FanReading.with_control(name, rpm, chip, base_path,
+                                                         channel, pwm_channel, pwm, pwm_enable);
                 }
             }
             return found;
@@ -1421,14 +1514,16 @@ namespace Singularity {
 
             // NVIDIA readings arrive asynchronously, so this merges whatever the
             // last query returned rather than waiting for a fresh one.
-            if (query_nvidia) {
+            if (query_nvidia && gpu_sampling) {
                 refresh_nvidia();
             }
             _base_readings = base_found;
 
             _fans = collect_fans();
             _power = collect_power();
-            sample_gpu_utilization(GLib.get_monotonic_time());
+            if (gpu_sampling) {
+                sample_gpu_utilization(GLib.get_monotonic_time());
+            }
 
             ClockReading[] clocks = collect_clocks();
             // Highest first, so a caller can take element 0 as "the" clock.
@@ -1505,7 +1600,7 @@ namespace Singularity {
             // reporting "nothing readable" there would hide real data.
             available = found.length > 0
                 || _clocks_khz.length > 0
-                || _fans.length > 0
+                || fans().length > 0
                 || _power.length > 0
                 || gpu_utilization >= 0.0;
 
