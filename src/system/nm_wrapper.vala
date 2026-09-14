@@ -123,10 +123,21 @@ namespace Singularity {
             init_client.begin();
         }
 
+        // NetworkManager is an OPTIONAL system service: plenty of real systems
+        // run iwd, an NM-compatible shim, or nothing at all instead. NM.Client
+        // already degrades gracefully when the name has no owner -- it
+        // documents itself as reporting zero devices rather than failing --
+        // but that guarantee is about the RESULT, not the TIME spent getting
+        // there. A name that is dbus-activatable but whose backing service is
+        // masked, missing a dependency, or otherwise stuck mid-activation can
+        // still make the caller wait before the failure surfaces. Bound the
+        // wait so a broken NetworkManager can never hold up has_wifi /
+        // is_wired_connected for longer than a few seconds.
         private async void init_client() {
+            var deadline = DBusOptionalService.deadline(3);
             try {
                 client = (NM.Client) GLib.Object.new(typeof(NM.Client));
-                yield client.init_async(Priority.DEFAULT, null);
+                yield client.init_async(Priority.DEFAULT, deadline);
                 if (client != null) {
                     message("NetworkManager Client initialized");
                     find_wifi_device();
@@ -158,7 +169,14 @@ namespace Singularity {
                     refresh_sharing_state();
                 }
             } catch (Error e) {
+                // client was already assigned above (GLib.Object.new() never
+                // fails), so a caught init error left a Client that never
+                // finished GInitable.init() -- calling into it further is
+                // undefined. Drop the reference so every other method's
+                // `client == null` guard does the right thing: report no
+                // wifi/ethernet/VPN rather than operate on a half-built proxy.
                 warning("Failed to initialize NetworkManager client: %s", e.message);
+                client = null;
             }
         }
 

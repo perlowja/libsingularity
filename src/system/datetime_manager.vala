@@ -24,10 +24,17 @@ namespace Singularity {
             init_async.begin();
         }
 
+        // systemd-timedated ships with systemd itself but is still an
+        // OPTIONAL service from this wrapper's point of view -- some images
+        // mask it in favor of a custom clock manager. Bound the connection
+        // so a dbus-activatable-but-broken instance can never hold up every
+        // consumer's `proxy == null` guard for longer than a few seconds; a
+        // healthy system resolves in milliseconds.
         private async void init_async() {
+            var deadline = DBusOptionalService.deadline(3);
             try {
-
-                proxy = yield Bus.get_proxy(BusType.SYSTEM, "org.freedesktop.timedate1", "/org/freedesktop/timedate1");
+                proxy = yield Bus.get_proxy(BusType.SYSTEM, "org.freedesktop.timedate1",
+                    "/org/freedesktop/timedate1", DBusProxyFlags.NONE, deadline);
                 message("DateTimeManager: Connected to org.freedesktop.timedate1");
 
                 proxy.notify["ntp"].connect(() => {

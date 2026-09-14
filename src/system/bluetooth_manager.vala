@@ -84,9 +84,17 @@ namespace Singularity {
             init_bluez();
         }
 
+        // BlueZ is an OPTIONAL system service -- boards with no Bluetooth
+        // hardware routinely have no bluetoothd at all. Bound the initial
+        // connection so a dbus-activatable-but-broken org.bluez can never
+        // hold up is_available for longer than a few seconds; a healthy
+        // system (present, or a normal on-demand activation) resolves in
+        // milliseconds and is unaffected.
         private async void init_bluez() {
+            var deadline = DBusOptionalService.deadline(3);
             try {
-                object_manager = yield Bus.get_proxy(BusType.SYSTEM, "org.bluez", "/");
+                object_manager = yield Bus.get_proxy(BusType.SYSTEM, "org.bluez", "/",
+                    DBusProxyFlags.NONE, deadline);
                 if (object_manager != null) {
                     message("BluetoothManager: Connected to org.bluez ObjectManager");
                     object_manager.interfaces_added.connect(on_interfaces_added);
@@ -107,6 +115,7 @@ namespace Singularity {
                 }
             } catch (Error e) {
                 warning("Failed to connect to BlueZ: %s", e.message);
+                object_manager = null;
             }
         }
 

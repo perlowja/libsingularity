@@ -224,6 +224,7 @@ if get_option('system')
   libsingularity_system_sources = files(
     'src/system/bluetooth_manager.vala',
     'src/system/datetime_manager.vala',
+    'src/system/dbus_optional_service.vala',
     'src/system/locale_manager.vala',
     'src/system/accounts_service.vala',
     'src/system/app_menu_registrar.vala',

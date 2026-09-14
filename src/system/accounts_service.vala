@@ -56,9 +56,16 @@ namespace Singularity.Core.Users {
             init_manager.begin();
         }
 
+        // accountsservice is nearly universal but still an OPTIONAL system
+        // service -- some minimal/embedded images do not ship it. Bound the
+        // connection so a dbus-activatable-but-broken instance can never
+        // hold up every consumer's `manager == null` guard for longer than a
+        // few seconds; a healthy system resolves in milliseconds.
         private async void init_manager() {
+            var deadline = DBusOptionalService.deadline(3);
             try {
-                manager = yield Bus.get_proxy (BusType.SYSTEM, "org.freedesktop.Accounts", "/org/freedesktop/Accounts");
+                manager = yield Bus.get_proxy (BusType.SYSTEM, "org.freedesktop.Accounts",
+                    "/org/freedesktop/Accounts", DBusProxyFlags.NONE, deadline);
                 manager.user_added.connect((path) => {
                     fetch_user.begin(path, (obj, res) => {
                         var user = fetch_user.end(res);

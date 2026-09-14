@@ -24,12 +24,20 @@ namespace Singularity {
             init.begin();
         }
 
+        // power-profiles-daemon is an OPTIONAL system service -- many boards
+        // (and most non-laptop hardware) never install it. Bound the
+        // connection so a dbus-activatable-but-broken instance can never
+        // hold up `available` for longer than a few seconds; a healthy
+        // system (present, or a normal on-demand activation) resolves in
+        // milliseconds and is unaffected.
         private async void init() {
+            var deadline = DBusOptionalService.deadline(3);
             try {
                 proxy = yield Bus.get_proxy<PowerProfilesProxy>(
                     BusType.SYSTEM,
                     "org.freedesktop.UPower.PowerProfiles",
-                    "/org/freedesktop/UPower/PowerProfiles"
+                    "/org/freedesktop/UPower/PowerProfiles",
+                    DBusProxyFlags.NONE, deadline
                 );
                 active_profile = proxy.active_profile;
                 available = true;
@@ -42,6 +50,7 @@ namespace Singularity {
                 profile_changed();
             } catch (Error e) {
                 warning("PowerProfilesManager: service not available: %s", e.message);
+                proxy = null;
                 available = false;
             }
         }
