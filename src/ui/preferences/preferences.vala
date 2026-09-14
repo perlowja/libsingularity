@@ -995,6 +995,13 @@ namespace Singularity.Widgets {
             }
         }
 
+        // Fire selection off the row's own inherited `activated` signal
+        // instead of a second, separate GestureClick. Two independent,
+        // ungrouped GestureClick controllers on one ActionRow compete for the
+        // same press/release sequence; the removed one unconditionally
+        // claimed it on press, which is a real hazard for event delivery
+        // ordering on a given backend/compositor. `activated` is the single
+        // canonical path every ActionRow already uses.
         private void add_option_row(string label, string id, string? subtitle, GLib.Icon? icon) {
             var row = new ActionRow(label, subtitle);
             row.activatable = true;
@@ -1007,16 +1014,11 @@ namespace Singularity.Widgets {
             if (id == current_value) {
                 row.add_suffix(new Image.from_icon_name("object-select-symbolic"));
             }
-            var gesture = new GestureClick();
-            gesture.pressed.connect((n, x, y) => {
-                gesture.set_state(EventSequenceState.CLAIMED);
-            });
-            gesture.released.connect(() => {
+            row.activated.connect(() => {
                 current_value = id;
                 selected(id);
                 expanded = false;
             });
-            row.add_controller(gesture);
             list_box.append(row);
         }
     }
