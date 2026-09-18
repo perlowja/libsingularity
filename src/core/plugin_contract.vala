@@ -399,6 +399,22 @@ namespace Singularity {
             vpn_provider_removed(provider);
         }
 
+        // -- Wallpaper providers (OCS networks, Bing, stock photo search, ..) -
+        public signal void wallpaper_provider_added(WallpaperProvider provider);
+        public signal void wallpaper_provider_removed(WallpaperProvider provider);
+
+        /**
+         * Registers a wallpaper provider. Its choices/items appear as a tab
+         * in the wallpaper browser alongside the built-in "singularity"
+         * (local) provider, and only while this plugin is enabled.
+         */
+        public void add_wallpaper_provider(WallpaperProvider provider) {
+            wallpaper_provider_added(provider);
+        }
+        public void remove_wallpaper_provider(WallpaperProvider provider) {
+            wallpaper_provider_removed(provider);
+        }
+
         // -- Shell surfaces (replaceable dock / panel / overview / ...) -------
         public signal void shell_surface_provider_added(ShellSurfaceProvider provider);
         public signal void shell_surface_provider_removed(ShellSurfaceProvider provider);

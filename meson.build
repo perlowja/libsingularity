@@ -123,6 +123,7 @@ libsingularity_sources = files(
   'src/core/shell_surface_contract.vala',
   'src/core/search_provider.vala',
   'src/core/vpn_provider.vala',
+  'src/core/wallpaper_provider.vala',
   'src/core/app_settings_loader.vala',
   'src/animation/animation.vala',
   'src/animation/timed_animation.vala',
