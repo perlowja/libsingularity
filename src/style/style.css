@@ -5386,3 +5386,13 @@ button.disk-card.selected {
     outline: 2px solid @accent_color;
     outline-offset: 2px;
 }
+
+/* Bordered frame so stacked sections sharing a popover column (e.g. the
+   sensors panel's resource-pool groups: GPU, VPU, Storage, ...) read as
+   distinct cards instead of one continuous list. */
+.sensors-resource-section {
+    border: 1px solid alpha(@text_color, 0.12);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 4px;
+}
